@@ -1,0 +1,40 @@
+# To install Neo4J on Ubuntu running on http://localhost:7474 (initial user and password are "neo4j")
+wget -O - https://debian.neo4j.com/neotechnology.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/neo4j.gpg
+echo "deb [signed-by=/usr/share/keyrings/neo4j.gpg] https://debian.neo4j.com stable 5" | sudo tee /etc/apt/sources.list.d/neo4j.list
+sudo apt update
+sudo apt install neo4j
+sudo systemctl enable neo4j
+sudo systemctl start neo4j
+cypher-shell
+
+# To open Neo4J cli with visual interface
+google-chrome
+digit http://localhost:7474
+
+# To change the password on Neo4J
+cypher-shell -u neo4j -p current_password
+ALTER USER neo4j SET PASSWORD 'amonolexandr';
+
+# To delete all nodes and relationships from Neo4J
+MATCH (n)
+DETACH DELETE n;
+
+MATCH (q)
+WITH q LIMIT 200000
+DETACH DELETE q
+
+# to dump the neo4j database
+sudo neo4j stop
+sudo neo4j-admin database dump neo4j --to-path=/home/olexandro/NLP --verbose
+sudo neo4j start
+
+# To commit on Github
+git add .
+git commit -m "Commit message"
+git push origin main
+
+# To pull from github
+git pull origin main    # or master, depending on your branch
+
+# To undo latest commit
+git reset --soft HEAD~1

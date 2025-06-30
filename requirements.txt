@@ -1,0 +1,12 @@
+numpy
+pandas
+matplotlib
+libxml2-utils
+mwparserfromhell
+unidecode
+langdetect
+wikiextractor
+xmltodict
+# git+https://github.com/fitnr/unwiki.git
+
+neo4j
