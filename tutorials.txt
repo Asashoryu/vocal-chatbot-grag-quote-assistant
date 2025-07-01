@@ -15,14 +15,6 @@ digit http://localhost:7474
 cypher-shell -u neo4j -p current_password
 ALTER USER neo4j SET PASSWORD 'amonolexandr';
 
-# To delete all nodes and relationships from Neo4J
-MATCH (n)
-DETACH DELETE n;
-
-MATCH (q)
-WITH q LIMIT 200000
-DETACH DELETE q
-
 # to dump the neo4j database
 sudo neo4j stop
 sudo neo4j-admin database dump neo4j --to-path=/home/olexandro/NLP --verbose
@@ -37,4 +29,6 @@ git push origin main
 git pull origin main    # or master, depending on your branch
 
 # To undo latest commit
+git rm -r --cached storage/ ## remove big and previously added files
 git reset --soft HEAD~1
+

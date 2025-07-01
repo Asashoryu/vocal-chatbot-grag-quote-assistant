@@ -1,10 +1,18 @@
 # Import the json to neo4j graph
 
-// --- 0. (No explicit constraint drops from within this script) ---
-// Based on your 'SHOW CONSTRAINTS' output, the problematic `:Quote(text)` constraint is gone.
+// Import the json to neo4j graph
+
+// --- 0. (Explicit constraint drops added to this script) ---
+// Based on your 'SHOW CONSTRAINTS' output, constraints will be dropped by name if they exist.
 // If the "Property value is too large to index" error reappears, it implies a
 // constraint on `:Quote(text)` has been re-added, and you would need to manually
 // drop it again (e.g., DROP CONSTRAINT constraint_name;).
+
+// Drop constraints IF EXISTS before recreation/import
+DROP CONSTRAINT constraint_author_name_unique IF EXISTS;
+DROP CONSTRAINT constraint_context_text_unique IF EXISTS;
+DROP CONSTRAINT constraint_detail_text_unique IF EXISTS;
+DROP CONSTRAINT constraint_quote_hash_unique IF EXISTS;
 
 
 // --- 1. OPTIONAL: Clear Existing Data (Use with EXTREME CAUTION) ---
@@ -13,24 +21,49 @@
 // WARNING: This will delete ALL nodes and relationships in your graph!
 // MATCH (n) DETACH DELETE n;
 
+// Repeatedly delete nodes in batches for larger graphs (as provided by you)
+MATCH (q)
+WITH q LIMIT 200000
+DETACH DELETE q;
+
+MATCH (q)
+WITH q LIMIT 200000
+DETACH DELETE q;
+
+MATCH (q)
+WITH q LIMIT 200000
+DETACH DELETE q;
+
+MATCH (q)
+WITH q LIMIT 200000
+DETACH DELETE q;
+
 
 // --- 2. Create Uniqueness Constraints for Efficiency and Data Integrity ---
 // These constraints ensure data integrity and optimize MERGE operations.
 // We are re-adding the constraint on 'hash' for Quote nodes for performance.
-CREATE CONSTRAINT IF NOT EXISTS FOR (a:Author) REQUIRE a.name IS UNIQUE;
-CREATE CONSTRAINT IF NOT EXISTS FOR (q:Quote) REQUIRE q.hash IS UNIQUE; // RE-ADDED for fast MERGE on Quote nodes
-CREATE CONSTRAINT IF NOT EXISTS FOR (c:Context) REQUIRE c.text IS UNIQUE; // Using 'text' property as per Python
-CREATE CONSTRAINT IF NOT EXISTS FOR (d:Detail) REQUIRE d.text IS UNIQUE;
+
+// Using meaningful constraint names (UNCOMMENTED for creation)
+CREATE CONSTRAINT constraint_author_name_unique IF NOT EXISTS FOR (a:Author) REQUIRE a.name IS UNIQUE;
+CREATE CONSTRAINT constraint_quote_hash_unique IF NOT EXISTS FOR (q:Quote) REQUIRE q.hash IS UNIQUE;
+CREATE CONSTRAINT constraint_context_text_unique IF NOT EXISTS FOR (c:Context) REQUIRE c.text IS UNIQUE;
+CREATE CONSTRAINT constraint_detail_text_unique IF NOT EXISTS FOR (d:Detail) REQUIRE d.text IS UNIQUE;
 
 
 // --- 3. Load the JSON Lines Data and Process Each Object IN BATCHES ---
 // apoc.periodic.iterate processes the data in smaller transactions (batches)
 // to avoid memory exhaustion for large imports.
 CALL apoc.periodic.iterate(
-    "CALL apoc.load.json('file:///quotes.json') YIELD value", // Outer query: loads data and yields individual JSON objects
+    "CALL apoc.load.json('file:///quotes.json') YIELD value", //  return value limit 1000 Outer query: loads data and yields individual JSON objects
     "
     // Inner query: processes each 'value' (JSON object) from the outer query
     WITH value AS quoteData
+
+    // --- CORRECTION 1: ADDED TOP-LEVEL DATA VALIDATION ---
+    // Ensure essential properties (author and quote) are not NULL or empty strings
+    // If these are missing, the line will be skipped, preventing potential errors down the line.
+    WHERE quoteData.author IS NOT NULL AND quoteData.author <> ''
+      AND quoteData.quote IS NOT NULL AND quoteData.quote <> ''
 
     // 3.1 Create or Merge the Author Node
     MERGE (a:Author {name: quoteData.author})
@@ -55,11 +88,16 @@ CALL apoc.periodic.iterate(
 
     // 3.5 Iterate through 'sources' (from JSON) to create 'Detail' Nodes and Relationships
     FOREACH (sourceData IN quoteData.sources |
-        // Create or Merge the Detail Node (using the ':Detail' label and 'text' property)
-        MERGE (d:Detail {text: sourceData.text})
+        // --- CORRECTION 2: ADDED INNER VALIDATION FOR SOURCE TEXT ---
+        // Conditionally execute the MERGE only if 'text' property exists and is not an empty string.
+        // This prevents creating Detail nodes with invalid or empty text.
+        FOREACH (_ IN CASE WHEN sourceData.text IS NOT NULL AND sourceData.text <> '' THEN [1] ELSE [] END |
+            // Create or Merge the Detail Node (using the ':Detail' label and 'text' property)
+            MERGE (d:Detail {text: sourceData.text})
 
-        // Create the HAS_DETAIL Relationship from the Quote to the Detail
-        MERGE (q)-[:HAS_DETAIL]->(d)
+            // Create the HAS_DETAIL Relationship from the Quote to the Detail
+            MERGE (q)-[:HAS_DETAIL]->(d)
+        )
     )
     ",
     // Configuration for apoc.periodic.iterate:
@@ -69,6 +107,7 @@ CALL apoc.periodic.iterate(
     {batchSize: 1000, parallel: false, iterateList: true} // You can adjust batchSize, 1000-10000 is usually good
 ) YIELD batches, total
 RETURN batches, total; // Returns the number of batches processed and total items
+
 
 # Is graph working query check
 MATCH (a:Author {name: "Albert Einstein"})-[:WROTE]->(q:Quote)
@@ -80,3 +119,60 @@ RETURN
     c.text AS Context, // Using 'text' property for Context as per the latest script
     collect(DISTINCT d.text) AS Sources // Collecting all unique source details
 ORDER BY q.text // Optional: Order the results by quote text for readability
+
+
+# Delete all constraints
+// Remove all constraints by their specific names
+// These names come directly from your "show CONSTRAINTS" output.
+DROP CONSTRAINT constraint_author_name_unique;
+DROP CONSTRAINT constraint_context_text_unique;
+DROP CONSTRAINT constraint_detail_text_unique;
+DROP CONSTRAINT constraint_quote_hash_unique;
+
+RETURN 'Database Reset Complete (All Nodes, Relationships, and Constraints Eliminated)' AS Status;
+
+
+# To delete all nodes and relationships from Neo4J
+MATCH (n)
+DETACH DELETE n;
+
+MATCH (q)
+WITH q LIMIT 200000
+DETACH DELETE q
+
+
+# quotes by Umberto echo
+MATCH (a:Author {name: "Umberto Eco"})-[:WROTE]->(q:Quote)
+RETURN q, a
+
+# count the number of nodes
+MATCH (n)
+RETURN count(n) AS totalNodes;
+
+
+## INDEXES CREATION
+
+// Index for Author names
+CREATE FULLTEXT INDEX authorNamesIndex IF NOT EXISTS
+FOR (n:Author) ON EACH [n.name];
+
+// Index for Quote text
+CREATE FULLTEXT INDEX quoteTextsIndex IF NOT EXISTS
+FOR (n:Quote) ON EACH [n.text];
+
+// Index for Context text
+CREATE FULLTEXT INDEX contextTextsIndex IF NOT EXISTS
+FOR (n:Context) ON EACH [n.text];
+
+// Index for Detail text
+CREATE FULLTEXT INDEX detailTextsIndex IF NOT EXISTS
+FOR (n:Detail) ON EACH [n.text];
+
+// OPTIONAL: A combined index for searching across multiple types
+CREATE FULLTEXT INDEX allTextContentIndex IF NOT EXISTS
+FOR (n:Author|Quote|Context|Detail) ON EACH [n.name, n.text];
+
+
+## SHOW INDEXES
+SHOW FULLTEXT INDEXES;
+
