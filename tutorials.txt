@@ -32,3 +32,5 @@ git pull origin main    # or master, depending on your branch
 git rm -r --cached storage/ ## remove big and previously added files
 git reset --soft HEAD~1
 
+# Download dependencies example
+pip install -r requirements_s2.txt

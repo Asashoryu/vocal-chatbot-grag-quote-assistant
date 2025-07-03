@@ -1,0 +1,48 @@
+# This file lists Python package dependencies for your local project.
+# To install these packages, navigate to your project directory in your terminal
+# (preferably within an activated virtual environment) and run:
+# pip install -r requirements_s2.txt
+
+# --- System-level dependencies (INSTALL MANUALLY ON YOUR OS if on Linux) ---
+# For Linux (e.g., Ubuntu/Debian), run:
+# sudo apt-get update
+# sudo apt-get install -y sox libsndfile1 ffmpeg portaudio19-dev libjpeg-dev zlib1g-dev nvidia-cuda-toolkit
+# sudo ldconfig
+# For Windows/macOS, you'll need to find equivalent installation methods for:
+# - FFmpeg (for pydub)
+# - PortAudio (for sounddevice)
+# - NVIDIA CUDA Toolkit (if you want GPU support for PyTorch/NeMo and have an NVIDIA GPU)
+# - General development libraries (libjpeg-dev, zlib1g-dev might be needed by some packages)
+
+# --- Python Package Dependencies ---
+
+# 1. PyTorch, Torchvision, and TorchAudio (with CUDA 11.8 support)
+#    This line explicitly installs a compatible version to resolve ABI issues.
+#    Make sure your local CUDA toolkit version matches (or is compatible with) cu118.
+torch==2.1.0
+torchvision==0.16.0
+torchaudio==2.1.0
+
+# 2. Core Python packages for audio handling and utilities
+sounddevice
+soundfile
+numpy<2 # Ensures numpy version is compatible with NeMo/PyTorch
+wget
+text-unidecode
+omegaconf
+
+
+# 3. CRITICAL FIX: Specific huggingface_hub version for NeMo compatibility
+huggingface_hub==0.23.2
+
+# 4. pydub for audio format conversion (requires FFmpeg system-level installation)
+pydub
+
+# 5. NeMo toolkit (ASR collection) from a specific branch
+#    This will install NeMo and its remaining dependencies.
+#    Ensure git is installed on your system for this to work.
+nemo_toolkit[asr] @ git+https://github.com/NVIDIA/NeMo.git@r2.0.0rc0
+
+nemo_toolkit[tts]
+
+request
