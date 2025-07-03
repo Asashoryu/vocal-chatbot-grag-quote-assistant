@@ -9,7 +9,7 @@ cypher-shell
 
 # To open Neo4J cli with visual interface
 google-chrome
-digit http://localhost:7474
+# digit http://localhost:7474
 
 # To change the password on Neo4J
 cypher-shell -u neo4j -p current_password
@@ -34,3 +34,9 @@ git reset --soft HEAD~1
 
 # Download dependencies example
 pip install -r requirements_s2.txt
+
+# Run ollama server
+ollama serve
+
+# Pull an open model from ollama (ex. phi3)
+ollama pull phi3
