@@ -10,3 +10,4 @@ xmltodict
 # git+https://github.com/fitnr/unwiki.git
 
 neo4j
+keyboard

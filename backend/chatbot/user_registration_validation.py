@@ -1,3 +1,8 @@
+import asyncio  # Ensure asyncio is imported
+import shutil  # Ensure shutil is imported if you use shutil.rmtree
+import pickle as pkl  # Ensure pickle is imported if you use pkl.load/dump
+# Make sure soundfile is imported if you need to save temporary WAVs
+import soundfile as sf
 import os
 import torch
 import sounddevice as sd
@@ -19,9 +24,13 @@ import requests
 
 import ollama  # Keep this import at the top of your file
 
+import config
+
 # NEW: Neo4j imports
 from neo4j import GraphDatabase
 from neo4j.exceptions import ServiceUnavailable
+
+USE_TTS_FOR_ANSWERS = config.USE_TTS_FOR_ANSWERS
 
 # Define a fallback for torch.cuda.amp.autocast if it's not available
 try:
@@ -34,23 +43,10 @@ except ImportError:
         """
         yield
 
-# --- Global Parameters (can be adjusted) ---
-RECORDING_DURATION_SECONDS = 5  # Default duration for new recordings
-SAMPLE_RATE = 16000  # This is the target sample rate for ASR and Speaker Recognition models
-# NEW: Common sample rate for TTS models (e.g., HiFi-GAN)
-TTS_SAMPLE_RATE = 22050
-AUDIO_RECORDINGS_DIR = "/home/olexandro/NLP/vocal-chatbot-grag-quote-assistant/storage/audio/audio_recordings"
-# This is where "registered" embeddings will be saved
-EMBEDDING_OUTPUT_DIR = "/home/olexandro/NLP/vocal-chatbot-grag-quote-assistant/storage/audio/speaker_embeddings"
-# A common threshold for speaker verification (adjust as needed)
-VERIFICATION_THRESHOLD = 0.7
-
-# NEW: Flag to control TTS for computer answers
-USE_TTS_FOR_ANSWERS = True
 
 # Ensure directories exist at script start
-os.makedirs(AUDIO_RECORDINGS_DIR, exist_ok=True)
-os.makedirs(EMBEDDING_OUTPUT_DIR, exist_ok=True)
+os.makedirs(config.AUDIO_RECORDINGS_DIR, exist_ok=True)
+os.makedirs(config.EMBEDDING_OUTPUT_DIR, exist_ok=True)
 
 # --- Helper function for TTS-enabled printing ---
 
@@ -61,7 +57,7 @@ def print_and_speak(text, tts_model_obj=None, vocoder_model_obj=None, speaker_em
     if use_tts_flag and tts_model_obj and vocoder_model_obj:
         print("(Speaking response...)")
         synthesize_speech(tts_model_obj, vocoder_model_obj, text, speaker_embedding_obj,
-                          output_filename="last_response.wav", output_dir=AUDIO_RECORDINGS_DIR)
+                          output_filename="last_response.wav", output_dir=config.AUDIO_RECORDINGS_DIR)
 
 
 # --- Load Speaker Verification Model (loaded once globally) ---
@@ -132,66 +128,104 @@ except Exception as e:
 
 
 # --- Function to Record Audio ---
-def record_audio(duration_seconds=RECORDING_DURATION_SECONDS, sample_rate=SAMPLE_RATE, output_filename="recorded_audio.wav", output_dir=AUDIO_RECORDINGS_DIR, prompt_message="Please speak clearly into your microphone now, at a normal to slightly louder volume."):
+def record_audio(sample_rate=config.SAMPLE_RATE, duration_seconds=config.RECORDING_DURATION_SECONDS,
+                 prompt_message="Type 'r' and press Enter to start recording for a fixed duration."):
     """
-    Records audio from the microphone using sounddevice, saves it as a WAV file.
+    Records audio from the microphone for a fixed duration after the user types 'r' and presses Enter.
+    Does NOT save the audio to a file. Returns the raw NumPy audio data.
+    Modified for WSL compatibility: uses input() instead of keyboard library.
     """
-    print(f"\n--- Starting Audio Recording ---")
-    print(f"Recording your voice for {duration_seconds} seconds...")
+    print(f"\n--- Starting Audio Recording Setup ---")
     print(prompt_message)
 
-    audio_filepath = None
+    recorded_audio_data = None  # This will hold the numpy array of recorded audio
 
     try:
-        os.makedirs(output_dir, exist_ok=True)
-        audio_filepath = os.path.join(output_dir, output_filename)
-
         devices = sd.query_devices()
         input_devices = [d for d in devices if d['max_input_channels'] > 0]
 
         if not input_devices:
-            print_and_speak("No input audio devices (microphones) found by sounddevice. Cannot record.",
-                            tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+            print(
+                "No input audio devices (microphones) found by sounddevice. Cannot record.")
+            print("Available sounddevice devices:")
+            print(devices)
             return None
         else:
             default_input_device_id = None
             try:
                 default_input_device_id = sd.default.device[0]
             except Exception:
-                default_input_device_id = input_devices[0]['index']
+                if input_devices:
+                    default_input_device_id = input_devices[0]['index']
+                else:
+                    print("No input devices found even after checking default.")
+                    return None
 
-            recording = sd.rec(int(duration_seconds * sample_rate), samplerate=sample_rate,
-                               channels=1, dtype='float32', device=default_input_device_id)
-            sd.wait()
-            print_and_speak("Recording finished.", tts_model,
-                            vocoder_model, None, USE_TTS_FOR_ANSWERS)
-            sf.write(audio_filepath, recording, sample_rate)
-            print_and_speak(f"Audio saved to: {audio_filepath}",
-                            tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+            print(
+                f"Using input device: {sd.query_devices(default_input_device_id)['name']} (ID: {default_input_device_id})")
 
-        return audio_filepath
+            # --- Wait for 'r' to start using input() ---
+            user_input = input(
+                "Type 'r' and press Enter to start recording: ").strip().lower()
+            if user_input != 'r':
+                print("Invalid input. Recording not started. Please try again.")
+                return None
+
+            print(f"\nRecording started for {duration_seconds} seconds...")
+
+            # --- Record for a fixed duration ---
+            # sd.rec returns the NumPy array directly
+            recorded_audio_data = sd.rec(int(duration_seconds * sample_rate),
+                                         samplerate=sample_rate,
+                                         channels=1,
+                                         dtype='float32',
+                                         device=default_input_device_id)
+            sd.wait()  # This will block until the recording is finished
+
+            # --- Recording finished ---
+            print("Recording finished.")
+
+            # No sf.write call here, as we are not saving the file
+
+            return recorded_audio_data  # Return the raw audio data
 
     except Exception as e:
-        print_and_speak(f"\nAn error occurred during recording: {e}",
-                        tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
-        print_and_speak("Please ensure: 1. Your microphone is connected and working. 2. All necessary Python packages are correctly installed (sounddevice, soundfile).",
-                        tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+        print(f"\nAn error occurred during recording: {e}")
+        error_message = (
+            "Please ensure: 1. Your microphone is connected and working. "
+            "2. All necessary Python packages are correctly installed (sounddevice). "
+            "3. For WSL, direct keypress monitoring is not supported; use 'Enter' to start recording for a fixed duration."
+        )
+        print(error_message)
+        return None
+
+    except Exception as e:
+        print(f"\nAn error occurred during recording: {e}")
+        error_message = (
+            "Please ensure: 1. Your microphone is connected and working. "
+            "2. All necessary Python packages are correctly installed (sounddevice, soundfile). "
+            "3. For WSL, direct keypress monitoring is not supported; use 'Enter' to start recording for a fixed duration."
+        )
+        print(error_message)
+        if 'print_and_speak' in globals() and callable(globals()['print_and_speak']):
+            print_and_speak(f"An error occurred during recording: {e}. {error_message}",
+                            tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
         return None
 
 
 # --- Function to Extract Speaker Embedding ---
-def extract_speaker_embedding(model, audio_filepath, target_sample_rate=SAMPLE_RATE, embedding_output_dir=EMBEDDING_OUTPUT_DIR, embedding_output_filename="speaker_embedding.pkl", save_embedding=True):
+def extract_speaker_embedding(model, audio_filepath, target_sample_rate=config.SAMPLE_RATE, embedding_output_dir=config.EMBEDDING_OUTPUT_DIR, embedding_output_filename="speaker_embedding.pkl", save_embedding=True):
     """
     Extracts speaker embedding from an audio file using the provided NeMo model
     and optionally saves the embedding. Handles resampling to target_sample_rate if needed.
     """
     if model is None:
-        print_and_speak("Error: Speaker verification model is not loaded. Cannot extract embedding.",
-                        tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+        print("Error: Speaker verification model is not loaded. Cannot extract embedding.",
+              tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
         return None
     if not os.path.exists(audio_filepath):
-        print_and_speak(f"Error: Audio file not found at {audio_filepath}. Cannot extract embedding.",
-                        tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+        print(f"Error: Audio file not found at {audio_filepath}. Cannot extract embedding.",
+              tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
         return None
 
     try:
@@ -225,9 +259,7 @@ def extract_speaker_embedding(model, audio_filepath, target_sample_rate=SAMPLE_R
         max_amplitude = torch.max(torch.abs(audio_signal_tensor)).item()
 
         if max_amplitude < 0.001:
-            print_and_speak(f"\nWARNING: Audio file '{os.path.basename(audio_filepath)}' appears to be silent or extremely quiet after processing.",
-                            tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
-            print_and_speak("This may lead to poor embedding quality. Please ensure the audio has clear speech.",
+            print_and_speak(f"\nAudio file '{os.path.basename(audio_filepath)}' appears to be silent or extremely quiet after processing. This may lead to poor embedding quality. Please ensure the audio has clear speech.",
                             tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
 
         audio_signal_len_tensor = torch.tensor(
@@ -244,10 +276,8 @@ def extract_speaker_embedding(model, audio_filepath, target_sample_rate=SAMPLE_R
                 if raw_embs_l2_norm > 1e-6:
                     embedding = embedding / raw_embs_l2_norm
                 else:
-                    print_and_speak(f"\nWARNING: L2 norm of the raw extracted embedding for '{os.path.basename(audio_filepath)}' is zero or very close to zero.",
-                                    tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
-                    print_and_speak("This indicates the model produced a silent/empty embedding. It will not be normalized.",
-                                    tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                    print_and_speak(
+                        f"\nWARNING: L2 norm of the raw extracted embedding for '{os.path.basename(audio_filepath)}' is zero or very close to zero. This indicates the model produced a silent/empty embedding. It will not be normalized.", tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
 
         if save_embedding:
             os.makedirs(embedding_output_dir, exist_ok=True)
@@ -255,16 +285,15 @@ def extract_speaker_embedding(model, audio_filepath, target_sample_rate=SAMPLE_R
                 embedding_output_dir, embedding_output_filename)
             with open(embedding_filepath, 'wb') as f:
                 pkl.dump(embedding, f)
-            print_and_speak(f"Embedding saved to: {embedding_filepath}",
+            print_and_speak(f"Embedding saved",
                             tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
 
         return embedding
 
     except Exception as e:
-        print_and_speak(f"\nAn error occurred during embedding extraction for '{os.path.basename(audio_filepath)}': {e}",
+        print_and_speak(f"\nAn error occurred during embedding extraction",
                         tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
-        print_and_speak("Please ensure: 1. The audio file is valid and readable. 2. The NeMo model loaded successfully without errors.",
-                        tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+        print("Please ensure: 1. The audio file is valid and readable. 2. The NeMo model loaded successfully without errors.")
         return None
 
 
@@ -272,35 +301,39 @@ def extract_speaker_embedding(model, audio_filepath, target_sample_rate=SAMPLE_R
 def verify_speaker_against_folder_embeddings(
     model,
     new_voice_audio_path,
-    registered_embeddings_folder=EMBEDDING_OUTPUT_DIR,
-    target_sample_rate=SAMPLE_RATE,
-    similarity_threshold=VERIFICATION_THRESHOLD
+    registered_embeddings_folder=config.EMBEDDING_OUTPUT_DIR,
+    target_sample_rate=config.SAMPLE_RATE,
+    similarity_threshold=config.VERIFICATION_THRESHOLD
 ):
     """
     Verifies a new voice against all pre-saved embeddings in a given folder,
     orders the results by similarity, and reports the best match.
     """
     if model is None:
-        print_and_speak("Error: Speaker verification model is not loaded. Cannot perform verification.",
+        print_and_speak("Error at Speaker verification. Cannot perform verification.",
                         tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+        print(
+            "Error: Speaker verification model is not loaded. Cannot perform verification.")
         return False, None, None, []
     if not os.path.exists(new_voice_audio_path):
-        print_and_speak(f"Error: New voice audio file not found at {new_voice_audio_path}. Cannot perform verification.",
+        print_and_speak("Error at Speaker verification. Cannot perform verification.",
                         tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+        print(
+            f"Error: New voice audio file not found at {new_voice_audio_path}. Cannot perform verification.")
         return False, None, None, []
     if not os.path.isdir(registered_embeddings_folder):
-        print_and_speak(f"Error: Registered embeddings folder not found at {registered_embeddings_folder}. Please ensure the folder exists and contains .pkl or .npy embedding files.",
+        print_and_speak("Error at Speaker verification. Cannot perform verification.",
                         tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+        print(
+            f"Error: Registered embeddings folder not found at {registered_embeddings_folder}. Please ensure the folder exists and contains .pkl or .npy embedding files.")
         return False, None, None, []
 
-    print_and_speak(f"\n--- Starting Speaker Verification Against Registered Embeddings ---",
-                    tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
-    print_and_speak(f"Verifying '{os.path.basename(new_voice_audio_path)}' against embeddings in '{registered_embeddings_folder}'...",
-                    tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+    print(f"\n--- Starting Speaker Verification Against Registered Embeddings ---")
+    print(
+        f"Verifying '{os.path.basename(new_voice_audio_path)}' against embeddings in '{registered_embeddings_folder}'...")
 
     # 1. Extract embedding for the new voice
-    print_and_speak("\nExtracting embedding for the new voice to be verified...",
-                    tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+    print("\nExtracting embedding for the new voice to be verified...")
     new_voice_embedding = extract_speaker_embedding(
         model=model,
         audio_filepath=new_voice_audio_path,
@@ -308,8 +341,9 @@ def verify_speaker_against_folder_embeddings(
         save_embedding=False  # Don't save this temporary embedding
     )
     if new_voice_embedding is None:
-        print_and_speak("Failed to extract embedding for the new voice. Aborting verification.",
+        print_and_speak("Error at Speaker verification. Cannot perform verification.",
                         tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+        print("Failed to extract embedding for the new voice. Aborting verification.")
         return False, None, None, []
 
     new_voice_embedding_tensor = torch.from_numpy(
@@ -322,12 +356,14 @@ def verify_speaker_against_folder_embeddings(
         registered_embeddings_folder) if f.endswith(('.pkl', '.npy'))]
 
     if not registered_files:
-        print_and_speak(f"No .pkl or .npy embedding files found in '{registered_embeddings_folder}'.",
+        print_and_speak("Error at Speaker verification. Cannot perform verification.",
                         tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+        print(
+            f"No .pkl or .npy embedding files found in '{registered_embeddings_folder}'.")
         return False, None, None, []
 
-    print_and_speak(f"\nFound {len(registered_files)} registered embeddings. Comparing...",
-                    tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+    print(
+        f"\nFound {len(registered_files)} registered embeddings. Comparing...")
 
     for filename in registered_files:
         filepath = os.path.join(registered_embeddings_folder, filename)
@@ -336,8 +372,8 @@ def verify_speaker_against_folder_embeddings(
                 registered_embedding = pkl.load(f)
 
             if not isinstance(registered_embedding, np.ndarray) or registered_embedding.ndim != 1:
-                print_and_speak(f"Skipping '{filename}': Invalid embedding format or shape.",
-                                tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                print(
+                    f"Skipping '{filename}': Invalid embedding format or shape.")
                 continue
 
             registered_embedding_tensor = torch.from_numpy(
@@ -353,8 +389,7 @@ def verify_speaker_against_folder_embeddings(
             # print(f"  - vs '{filename}': Score = {score:.4f} -> {'MATCH' if is_same_speaker else 'NO MATCH'}") # Removed for less verbosity
 
         except Exception as e:
-            print_and_speak(f"Error processing '{filename}': {e}. Skipping this file.",
-                            tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+            print(f"Error processing '{filename}': {e}. Skipping this file.")
             continue
 
     # 3. Sort results by similarity score (descending)
@@ -366,8 +401,7 @@ def verify_speaker_against_folder_embeddings(
     best_match_exceeds_threshold = False
 
     # 4. Find the best match that is also above the threshold
-    print_and_speak("\n--- Detailed Results (Sorted by Similarity) ---",
-                    tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+    print("\n--- Detailed Results (Sorted by Similarity) ---")
     if not all_results_sorted:
         print_and_speak("No valid comparisons were made.",
                         tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
@@ -376,27 +410,26 @@ def verify_speaker_against_folder_embeddings(
             filename = result['filename']
             score = result['score']
             is_match = result['is_match']
-            print_and_speak(f"  - {filename:<30} | Score: {score:.4f} | {'Match Found!' if is_match else 'No Match.'}",
-                            tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+            print(
+                f"  - {filename:<30} | Score: {score:.4f} | {'Match Found!' if is_match else 'No Match.'}")
 
             if is_match and score > best_overall_score:  # Find the best score that also meets threshold
                 best_overall_score = score
                 best_overall_match_filename = filename
                 best_match_exceeds_threshold = True
 
-    print_and_speak("\n--- Final Verification Summary ---",
-                    tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+    print("\n--- Final Verification Summary ---")
     if best_match_exceeds_threshold:
         print_and_speak(f"SUCCESS: The new voice is identified as '{best_overall_match_filename}'!",
                         tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
-        print_and_speak(f"         Similarity Score: {best_overall_score:.4f} (Above threshold: {similarity_threshold:.4f})",
+        print_and_speak(f"         Similarity Score is {best_overall_score:.4f} (Above the threshold that is {similarity_threshold:.4f})",
                         tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
     elif all_results_sorted:
         highest_score_overall = all_results_sorted[0]['score']
         highest_score_filename = all_results_sorted[0]['filename']
         print_and_speak(f"NO MATCH: The new voice is likely DIFFERENT from all registered speakers.",
                         tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
-        print_and_speak(f"          Highest similarity found was with '{highest_score_filename}' at {highest_score_overall:.4f} (Below threshold: {similarity_threshold:.4f}).",
+        print_and_speak(f"          Highest similarity found at score {highest_score_overall:.4f} (Below the threshold that is {similarity_threshold:.4f}).",
                         tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
     else:
         print_and_speak("No registered embeddings were processed, or an error occurred. Cannot verify speaker.",
@@ -406,44 +439,43 @@ def verify_speaker_against_folder_embeddings(
 
 
 # --- NEW: ASR Module ---
-def transcribe_audio(model, audio_filepath, sample_rate=SAMPLE_RATE):
+def transcribe_audio(model, audio_filepath, sample_rate=config.SAMPLE_RATE):
     """
     Transcribes an audio file using the provided ASR model.
     """
     if model is None:
-        print_and_speak("Error: ASR model is not loaded. Cannot transcribe audio.",
+        print_and_speak("Error with ASR. Cannot transcribe audio.",
                         tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+        print("Error: ASR model is not loaded. Cannot transcribe audio.")
         return None
     if not os.path.exists(audio_filepath):
-        print_and_speak(f"Error: Audio file not found at {audio_filepath}. Cannot transcribe.",
+        print_and_speak("Error with ASR. Cannot transcribe audio.",
                         tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+        print(
+            f"Error: Audio file not found at {audio_filepath}. Cannot transcribe.")
         return None
 
     try:
-        print_and_speak(f"\n--- Starting ASR Transcription for '{os.path.basename(audio_filepath)}' ---",
-                        tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+        print(
+            f"\n--- Starting ASR Transcription for '{os.path.basename(audio_filepath)}' ---")
         # NeMo ASR models expect a list of file paths
         transcriptions = model.transcribe([audio_filepath])
         if transcriptions and len(transcriptions) > 0:
             transcribed_text = transcriptions[0]
-            print_and_speak(f"Transcription: \"{transcribed_text}\"",
+            print_and_speak(f"The Transcription is: \"{transcribed_text}\"",
                             tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
             return transcribed_text
         else:
-            print_and_speak("ASR returned no transcription.",
+            print_and_speak("Error with ASR. Cannot transcribe audio.",
                             tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+            print("ASR returned no transcription.")
             return None
     except Exception as e:
-        print_and_speak(f"An error occurred during ASR transcription: {e}",
+        print_and_speak("Error with ASR. Cannot transcribe audio.",
                         tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+        print(f"An error occurred during ASR transcription: {e}")
         return None
 
-
-# --- Neo4j Connection and Search Functions ---
-# IMPORTANT: Replace these with your actual Neo4j connection details.
-NEO4J_URI = "bolt://localhost:7687"
-NEO4J_USERNAME = "neo4j"
-NEO4J_PASSWORD = "amonolexandr"  # <--- REPLACE WITH YOUR ACTUAL NEO4J PASSWORD
 
 # Mapping of user-friendly entity types to their corresponding Full-Text Index names
 ENTITY_INDEX_MAP = {
@@ -579,10 +611,8 @@ async def call_local_llm(prompt: str) -> str:
     Returns:
         str: The generated response from the Ollama model.
     """
-    print_and_speak("--- Calling local LLM (via Ollama) ---", tts_model,
-                    vocoder_model, None, USE_TTS_FOR_ANSWERS)
-    # Print first 500 chars of prompt for debugging
-    print(f"LLM Prompt:\n{prompt[:500]}...")
+    print("--- Calling local LLM (via Ollama) ---")
+    print(f"LLM Prompt:\n{prompt}...")
 
     # Define the Ollama model you want to use.
     # Make sure this model is pulled locally via 'ollama pull <model_name>'
@@ -621,12 +651,12 @@ async def query_neo4j_rag(user_query: str, recognized_user_id: str = "unknown") 
     """
     Function for querying the Neo4j graph and performing RAG with a local LLM.
     """
-    print_and_speak(f"\n--- Chatbot: Processing Query for '{recognized_user_id}' ---",
-                    tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
-    print_and_speak(f"User Query (ASR): \"{user_query}\"",
-                    tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+    print(f"\n--- Chatbot: Processing Query for '{recognized_user_id}' ---")
+    print(f"User Query (ASR): \"{user_query}\"")
 
-    neo4j_connector = Neo4jConnector(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD)
+    neo4j_connector = Neo4jConnector(
+        config.NEO4J_URI, config.NEO4J_USERNAME, config.NEO4J_PASSWORD
+    )
     if not neo4j_connector.connect():
         return "I'm sorry, I cannot connect to the knowledge base at this moment. Please try again later."
 
@@ -669,24 +699,18 @@ async def query_neo4j_rag(user_query: str, recognized_user_id: str = "unknown") 
 
     except Exception as e:
         print_and_speak(
-            f"Error during Neo4j retrieval: {e}", tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+            f"An error during Neo4j retrieval happened; no answer will be generated for the query.", tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+        print(f"Error during Neo4j retrieval: {e}")
         context_string_for_llm = "An error occurred while searching the knowledge base. Please try rephrasing your question."
     finally:
         neo4j_connector.close()
 
-    # --- LLM for Response Generation (using local open-source LLM) ---
-    # print_and_speak("Generating natural language response using local LLM...",
-    #                 tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
-
-    llm_prompt = f"""You are a helpful chatbot that answers questions based on provided context from a graph database of quotes.
+    llm_prompt = f"""You are a succinct chatbot that answers questions based on provided context from a graph database of quotes.
     User's query: "{user_query}"
     Context from Neo4j graph:
     {context_string_for_llm}
 
-    Based on the user's query and the provided context, generate a concise, accurate, and helpful response.
-    If the context explicitly states "No specific content found" just say that no match was found.
-    Prioritize using the retrieved information directly when it's relevant to the user's question about quotes, authors, or details.
-    If multiple results are provided in the context, integrate them coherently into your answer. IMPORTANT: BE VERY CONCISE OR I DELETE YOU!!!
+    Summarize the answers. IMPORTANT: BE VERY CONCISE OR I DELETE YOU!!!
     """
 
     llm_response = await call_local_llm(llm_prompt)
@@ -696,7 +720,7 @@ async def query_neo4j_rag(user_query: str, recognized_user_id: str = "unknown") 
 # --- NEW: Personalized Text-to-Speech (TTS) Module ---
 
 
-def synthesize_speech(tts_model_obj, vocoder_model_obj, text: str, speaker_embedding: np.ndarray = None, output_filename="response.wav", output_dir=AUDIO_RECORDINGS_DIR):
+def synthesize_speech(tts_model_obj, vocoder_model_obj, text: str, speaker_embedding: np.ndarray = None, output_filename="response.wav", output_dir=config.AUDIO_RECORDINGS_DIR):
     """
     Synthesizes speech from text using NeMo TTS models.
     Can optionally be conditioned by a speaker embedding for personalization.
@@ -763,12 +787,11 @@ def synthesize_speech(tts_model_obj, vocoder_model_obj, text: str, speaker_embed
             audio = audio / np.abs(audio).max() * 0.9
 
         # Save and play audio
-        sf.write(output_filepath, audio, TTS_SAMPLE_RATE)
-        sd.play(audio, TTS_SAMPLE_RATE)
+        sf.write(output_filepath, audio, TTS_config.SAMPLE_RATE)
+        sd.play(audio, TTS_config.SAMPLE_RATE)
         sd.wait()
 
         return output_filepath
-
     except Exception as e:
         print(f"An error occurred during TTS synthesis: {e}")
         return None
@@ -780,42 +803,133 @@ async def interactive_main():  # Changed to async to support await in query_neo4
     global USE_TTS_FOR_ANSWERS  # Allow modifying the global flag within this function
 
     if verification_model is None or asr_model is None or tts_model is None or vocoder_model is None:
-        print_and_speak("\nERROR: One or more required models could not be loaded. Some functionalities may be unavailable.",
-                        tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+        print("\nERROR: One or more required models could not be loaded. Some functionalities may be unavailable.")
+
+    print_and_speak("Welcome to the Vocal Chatbot!",
+                    tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
 
     # Initial check and prompt for TTS
     if USE_TTS_FOR_ANSWERS:
-        print_and_speak("Text to speech for computer answers is currently **enabled**.",
-                        tts_model, vocoder_model, None, False)  # Don't speak this message twice
-        print("Text to speech for computer answers is currently **enabled**.")
+        print("NOTICE: Text to speech for computer answers is currently **enabled**.")
     else:
-        print("Text to speech for computer answers is currently **disabled**.")
+        print("NOTICE: Text to speech for computer answers is currently **disabled**.")
 
     while True:
         print("\n" + "="*50)
         print("VOCAL CHATBOT SYSTEM MENU")
         print("="*50)
         print("1. Register a new speaker")
-        print("2. Authenticate User (Voice Identification)")  # New option
-        print("3. Start Voice Chat (Authenticated)")  # New option
-        print("4. Query Neo4j (Text Input)")  # New option
-        print("5. Transcribe an audio file (ASR only)")  # Shifted
-        print("6. Convert an existing audio file to embedding")  # Shifted
-        print("7. Synthesize speech from text (TTS only)")  # Shifted
-        print("8. List all registered speaker embeddings")  # Shifted
-        print("9. Delete a registered speaker embedding")  # Shifted
-        print("10. Clear ALL registered speaker embeddings")  # Shifted
+        print("2. Authenticate User (Voice Identification)")
+        print("3. Start Voice Chat (Authenticated)")
+        # This will remain text input unless specifically changed
+        print("4. Query Neo4j (Text Input)")
+        print("5. Transcribe an audio file (ASR only)")
+        print("6. Convert an existing audio file to embedding")
+        print("7. Synthesize speech from text (TTS only)")
+        print("8. List all registered speaker embeddings")
+        print("9. Delete a registered speaker embedding")
+        print("10. Clear ALL registered speaker embeddings")
         print(
-            f"11. Toggle TTS for computer answers (Currently: {'ENABLED' if USE_TTS_FOR_ANSWERS else 'DISABLED'})")  # Shifted
+            f"11. Toggle TTS for computer answers (Currently: {'ENABLED' if USE_TTS_FOR_ANSWERS else 'DISABLED'})")
         print("0. Exit")
         print("="*50)
 
-        choice = input("Enter your choice: ").strip()
+        print_and_speak("Please speak your choice from the menu.",
+                        tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+        MENU_RECORDING_DURATION = 2
+        # record_audio now returns raw audio data (NumPy array)
+        recorded_menu_audio_data = record_audio(
+            # Make sure this matches the fixed duration you want
+            duration_seconds=MENU_RECORDING_DURATION,
+            prompt_message=f"Please speak your menu choice (e.g., 'one', 'two', 'exit') for {config.RECORDING_DURATION_SECONDS} seconds."
+        )
 
-        # Moved the original '1. Register a new speaker'
-        if choice == '1':
-            print_and_speak("\n--- Register New Speaker ---",
+        choice = ""  # Initialize choice
+        # Initialize as string to prevent issues if ASR fails immediately
+        transcribed_menu_choice = ""
+        menu_choice_audio_filepath = None  # Initialize for temporary file
+
+        if recorded_menu_audio_data is not None:
+            try:
+                # --- Temporarily save the recorded audio to a file for transcription ---
+                temp_audio_output_dir = config.AUDIO_RECORDINGS_DIR
+                temp_audio_output_filename = "menu_choice_temp.wav"
+
+                os.makedirs(temp_audio_output_dir, exist_ok=True)
+                menu_choice_audio_filepath = os.path.join(
+                    temp_audio_output_dir, temp_audio_output_filename)
+
+                sf.write(menu_choice_audio_filepath,
+                         recorded_menu_audio_data, config.SAMPLE_RATE)
+                print(
+                    f"Temporary audio saved to: {menu_choice_audio_filepath}")
+
+                raw_transcription_result = transcribe_audio(
+                    asr_model, menu_choice_audio_filepath)
+
+                if isinstance(raw_transcription_result, list) and len(raw_transcription_result) > 0:
+                    transcribed_menu_choice = raw_transcription_result[0].strip(
+                    )
+                    print(
+                        f"The Transcription is: \"['{transcribed_menu_choice}']\"")
+                elif raw_transcription_result is not None:
+                    transcribed_menu_choice = raw_transcription_result.strip()
+                    print(
+                        f"The Transcription is: \"{transcribed_menu_choice}\"")
+                else:
+                    print_and_speak("I couldn't transcribe your speech for the menu choice. Please try again.",
+                                    tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                    continue
+
+            finally:
+                if menu_choice_audio_filepath and os.path.exists(menu_choice_audio_filepath):
+                    os.remove(menu_choice_audio_filepath)
+                    print(
+                        f"Cleaned up temporary menu audio: {menu_choice_audio_filepath}")
+        else:
+            print_and_speak("No audio recorded for menu choice. Please try again.",
                             tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+            continue
+
+        spoken_numbers = {
+            "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+            "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+            "ten": "10", "eleven": "11", "exit": "0", "register": "1",
+            "authenticate": "2", "chat": "3", "query": "4", "transcribe": "5",
+            "embedding": "6", "synthesize": "7", "list": "8", "delete": "9",
+            "clear": "10", "toggle": "11"
+        }
+
+        lower_transcribed_menu_choice = transcribed_menu_choice.lower()
+        for word, digit in spoken_numbers.items():
+            if word in lower_transcribed_menu_choice:
+                choice = digit
+                break
+
+        if not choice and lower_transcribed_menu_choice.isdigit():
+            choice = lower_transcribed_menu_choice.strip()
+
+        if not choice:
+            print_and_speak("I didn't understand your choice. Please try speaking clearly a number from the menu.",
+                            tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+            continue
+
+        print(
+            f"User's spoken choice (transcribed): {transcribed_menu_choice} -> Processed Choice: {choice}")
+
+        if not choice:
+            print_and_speak("I didn't understand your choice. Please try again.",
+                            tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+            continue
+
+        print(f"User's spoken choice (transcribed): {choice}")
+
+        # --- CORRECTED IF/ELIF CHAIN START ---
+
+        if choice == '1':  # This 'if' was missing in your provided traceback
+            print_and_speak("\nYou have chosen to register a new user.",
+                            tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+
             user_id = input(
                 "Enter a unique ID for the speaker (e.g., 'Alice', 'Bob'): ").strip()
             if not user_id:
@@ -823,185 +937,369 @@ async def interactive_main():  # Changed to async to support await in query_neo4
                                 tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
                 continue
 
-            output_wav_filename = f"{user_id}_registered_voice.wav"
-            recorded_audio_filepath = record_audio(
-                output_filename=output_wav_filename,
-                prompt_message=f"Please speak for {RECORDING_DURATION_SECONDS} seconds to register '{user_id}'."
+            recorded_audio_data = record_audio(
+                duration_seconds=config.RECORDING_DURATION_SECONDS,
+                prompt_message=f"Please speak for {config.RECORDING_DURATION_SECONDS} seconds to register '{user_id}'."
             )
-            if recorded_audio_filepath:
+
+            if recorded_audio_data is not None:
+                output_wav_filename = f"{user_id}_registered_voice.wav"
+                temp_audio_filepath = os.path.join(
+                    config.AUDIO_RECORDINGS_DIR, output_wav_filename)
+                sf.write(temp_audio_filepath,
+                         recorded_audio_data, config.SAMPLE_RATE)
+                print(
+                    f"Temporary audio saved for embedding extraction: {temp_audio_filepath}")
+
                 embedding_filename = f"{user_id}_embedding.pkl"
                 speaker_embedding = extract_speaker_embedding(
                     verification_model,
-                    recorded_audio_filepath,
+                    temp_audio_filepath,
                     embedding_output_filename=embedding_filename,
                     save_embedding=True
                 )
-                if speaker_embedding is not None:
-                    print_and_speak(
-                        f"Speaker '{user_id}' registered successfully!", tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
-                else:
-                    print_and_speak(
-                        f"Failed to register speaker '{user_id}'.", tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
-            else:
-                print_and_speak(
-                    "Audio recording failed. Speaker not registered.", tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
 
-        # New option: Authenticate User
-        elif choice == '2':
-            print_and_speak("\n--- Authenticate User (Voice Identification) ---",
-                            tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
-            temp_audio_filepath = record_audio(
-                output_filename="voice_to_verify.wav",
-                prompt_message=f"Please speak for {RECORDING_DURATION_SECONDS} seconds for authentication."
-            )
-
-            if temp_audio_filepath:
-                is_identified, identified_user_filename, score, all_speaker_results = verify_speaker_against_folder_embeddings(
-                    verification_model, temp_audio_filepath)
-
-                recognized_user_id = "unknown"
-                if is_identified:
-                    recognized_user_id = identified_user_filename.replace(
-                        "_embedding.pkl", "")
-                    print_and_speak(f"Authentication successful! Identified User: {recognized_user_id}. Score: {score:.4f}",
-                                    tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
-                else:
-                    print_and_speak(f"Authentication failed. User not identified. Best match (if any) was {identified_user_filename.replace('_embedding.pkl', '') if identified_user_filename else 'none'} with score: {score:.4f}",
-                                    tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
-                    # For more detail in logs, print all speaker results
-                    for result_id, result_score in all_speaker_results.items():
-                        print(f" - {result_id} | Score: {result_score:.4f}")
-
-                # Clean up the temporary audio file
                 if os.path.exists(temp_audio_filepath):
                     os.remove(temp_audio_filepath)
-                    print(f"Cleaned up temporary audio: {temp_audio_filepath}")
+                    print(
+                        f"Cleaned up temporary registration audio: {temp_audio_filepath}")
+
+                if speaker_embedding is not None:
+                    print_and_speak(
+                        f"User '{user_id}' registered successfully!", tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                else:
+                    print_and_speak(
+                        f"Failed to register the user '{user_id}'.", tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+            else:
+                print_and_speak(
+                    "Audio recording failed. User not registered.", tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+
+        elif choice == '2':
+            print_and_speak("\nYou have chosen to authenticate the user.",
+                            tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+
+            recorded_auth_audio_data = record_audio(
+                duration_seconds=config.RECORDING_DURATION_SECONDS,
+                prompt_message=f"Please speak for {config.RECORDING_DURATION_SECONDS} seconds for authentication."
+            )
+
+            temp_audio_filepath = None
+            if recorded_auth_audio_data is not None:
+                try:
+                    temp_audio_output_filename = "voice_to_verify_temp.wav"
+                    temp_audio_filepath = os.path.join(
+                        config.AUDIO_RECORDINGS_DIR, temp_audio_output_filename)
+                    sf.write(temp_audio_filepath,
+                             recorded_auth_audio_data, config.SAMPLE_RATE)
+                    print(
+                        f"Temporary audio saved for authentication: {temp_audio_filepath}")
+
+                    is_identified, identified_user_filename, score, all_speaker_results = verify_speaker_against_folder_embeddings(
+                        verification_model, temp_audio_filepath)
+
+                    recognized_user_id = "unknown"
+                    if is_identified:
+                        recognized_user_id = identified_user_filename.replace(
+                            "_embedding.pkl", "")
+                        print_and_speak(f"Authentication was successful!",
+                                        tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                        print(
+                            f"Authentication successful! Identified User: {recognized_user_id}. Score: {score:.4f}")
+                    else:
+                        print_and_speak(f"Authentication failed.",
+                                        tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                        print(
+                            f"Authentication failed. User not identified. Best match (if any) was {identified_user_filename.replace('_embedding.pkl', '') if identified_user_filename else 'none'} with score: {score:.4f}")
+                        for result_id, result_score in all_speaker_results.items():
+                            print(
+                                f" - {result_id} | Score: {result_score:.4f}")
+
+                finally:
+                    if temp_audio_filepath and os.path.exists(temp_audio_filepath):
+                        os.remove(temp_audio_filepath)
+                        print(
+                            f"Cleaned up temporary auth audio: {temp_audio_filepath}")
             else:
                 print_and_speak("No audio recorded for authentication.",
                                 tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
 
-        # New option: Start Voice Chat (Authenticated)
         elif choice == '3':
-            print_and_speak("\n--- Starting Voice Chat (Requires prior authentication) ---",
+            print_and_speak("\nYou have chosen to start a Voice Chat.",
                             tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
 
-            # First, check if there's a recently identified user or prompt for one
-            # This part needs state management, for simplicity, we'll re-authenticate or ask.
             print_and_speak("Please authenticate yourself first.",
                             tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
-            temp_auth_audio_filepath = record_audio(
-                output_filename="chat_auth_voice.wav",
-                prompt_message=f"Speak for {RECORDING_DURATION_SECONDS} seconds to authenticate for chat."
+
+            recorded_chat_auth_audio_data = record_audio(
+                duration_seconds=config.RECORDING_DURATION_SECONDS,
+                prompt_message=f"Speak for {config.RECORDING_DURATION_SECONDS} seconds to authenticate for chat."
             )
 
             recognized_user_id = "unknown"
             personalization_embedding = None
+            temp_auth_audio_filepath = None
 
-            if temp_auth_audio_filepath:
-                is_identified, identified_user_filename, score, _ = verify_speaker_against_folder_embeddings(
-                    verification_model, temp_auth_audio_filepath)
-
-                if is_identified:
-                    recognized_user_id = identified_user_filename.replace(
-                        "_embedding.pkl", "")
-                    print_and_speak(f"Authenticated as: {recognized_user_id}. Now, please state your query.",
-                                    tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
-                    # Load personalization embedding
-                    embedding_path = os.path.join(
-                        EMBEDDING_OUTPUT_DIR, identified_user_filename)
-                    if os.path.exists(embedding_path):
-                        with open(embedding_path, 'rb') as f:
-                            personalization_embedding = pkl.load(f)
-                    else:
-                        print(
-                            f"Warning: Personalization embedding file not found for {recognized_user_id}. Using default voice.")
-
-                    # Clean up auth audio
-                    os.remove(temp_auth_audio_filepath)
+            if recorded_chat_auth_audio_data is not None:
+                try:
+                    temp_auth_audio_output_filename = "chat_auth_voice_temp.wav"
+                    temp_auth_audio_filepath = os.path.join(
+                        config.AUDIO_RECORDINGS_DIR, temp_auth_audio_output_filename)
+                    sf.write(temp_auth_audio_filepath,
+                             recorded_chat_auth_audio_data, config.SAMPLE_RATE)
                     print(
-                        f"Cleaned up temporary auth audio: {temp_auth_audio_filepath}")
+                        f"Temporary audio saved for chat authentication: {temp_auth_audio_filepath}")
 
-                else:
-                    print_and_speak("Authentication failed. Cannot start chat.",
-                                    tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
-                    if os.path.exists(temp_auth_audio_filepath):
+                    is_identified, identified_user_filename, score, _ = verify_speaker_against_folder_embeddings(
+                        verification_model, temp_auth_audio_filepath)
+
+                    if is_identified:
+                        recognized_user_id = identified_user_filename.replace(
+                            "_embedding.pkl", "")
+                        print_and_speak(f"Authenticated as: {recognized_user_id}. Now, please state your query.",
+                                        tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                        embedding_path = os.path.join(
+                            config.EMBEDDING_OUTPUT_DIR, identified_user_filename)
+                        if os.path.exists(embedding_path):
+                            try:
+                                with open(embedding_path, 'rb') as f:
+                                    personalization_embedding = pkl.load(f)
+                            except Exception as e:
+                                print(
+                                    f"Warning: Error loading embedding for {recognized_user_id}: {e}. Using default voice.")
+
+                    else:
+                        print_and_speak("Authentication failed. Cannot start chat. Returning to the menu.",
+                                        tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                        continue
+                finally:
+                    if temp_auth_audio_filepath and os.path.exists(temp_auth_audio_filepath):
                         os.remove(temp_auth_audio_filepath)
-                    continue  # Go back to main menu
+                        print(
+                            f"Cleaned up temporary auth audio: {temp_auth_audio_filepath}")
 
             else:
                 print_and_speak("Authentication audio not recorded. Cannot start chat.",
                                 tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
-                continue  # Go back to main menu
-
-            # Proceed with chat query only if authentication was successful
-            temp_query_audio_filepath = record_audio(
-                output_filename="current_chat_query.wav",
-                prompt_message=f"Please state your query for {RECORDING_DURATION_SECONDS} seconds."
-            )
-
-            if temp_query_audio_filepath:
-                user_query = transcribe_audio(
-                    asr_model, temp_query_audio_filepath)
-
-                if user_query:
-                    chatbot_response = await query_neo4j_rag(user_query, recognized_user_id)
-                    print_and_speak(f"\n--- Chatbot: {chatbot_response}",
-                                    tts_model, vocoder_model, personalization_embedding, USE_TTS_FOR_ANSWERS)
-                else:
-                    print_and_speak("Could not transcribe audio. Please try speaking more clearly.",
-                                    tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
-
-                # Clean up query audio
-                if os.path.exists(temp_query_audio_filepath):
-                    os.remove(temp_query_audio_filepath)
-                    print(
-                        f"Cleaned up temporary query audio: {temp_query_audio_filepath}")
-            else:
-                print_and_speak("No query audio recorded for chat session.",
-                                tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
-
-        # New option: Query Neo4j (Text Input)
-        elif choice == '4':
-            print_and_speak("\n--- Query Neo4j (Text Input) ---",
-                            tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
-            user_query = input("Enter your text query: ").strip()
-            if not user_query:
-                print_and_speak("Query cannot be empty. Returning to menu.",
-                                tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
                 continue
 
-            # For text queries, we don't have a voice to identify, so user_id is generic
-            # You might want to ask for a user ID here if it's relevant for text queries
-            recognized_user_id = "text_user"
+            recorded_query_audio_data = record_audio(
+                duration_seconds=config.RECORDING_DURATION_SECONDS,
+                prompt_message=f"Please state your query for {config.RECORDING_DURATION_SECONDS} seconds."
+            )
 
-            chatbot_response = await query_neo4j_rag(user_query, recognized_user_id)
-            print_and_speak(f"\n--- Chatbot: {chatbot_response}",
-                            tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)  # No personalization for text input
+            temp_query_audio_filepath = None
+            if recorded_query_audio_data is not None:
+                try:
+                    temp_query_audio_output_filename = "current_chat_query_temp.wav"
+                    temp_query_audio_filepath = os.path.join(
+                        config.AUDIO_RECORDINGS_DIR, temp_query_audio_output_filename)
+                    sf.write(temp_query_audio_filepath,
+                             recorded_query_audio_data, config.SAMPLE_RATE)
+                    print(
+                        f"Temporary audio saved for query: {temp_query_audio_filepath}")
 
-        # Original option 3, now 5
+                    user_query_list = transcribe_audio(
+                        asr_model, temp_query_audio_filepath)
+
+                    user_query = ""
+                    if isinstance(user_query_list, list) and len(user_query_list) > 0:
+                        user_query = user_query_list[0].strip()
+                    elif user_query_list is not None:
+                        user_query = str(user_query_list).strip()
+
+                    if user_query:
+                        chatbot_response = await query_neo4j_rag(user_query, recognized_user_id)
+                        print_and_speak(f"\n--- Chatbot: {chatbot_response}",
+                                        tts_model, vocoder_model, personalization_embedding, USE_TTS_FOR_ANSWERS)
+                    else:
+                        print_and_speak("Could not transcribe audio. Please try speaking more clearly.",
+                                        tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                finally:
+                    if temp_query_audio_filepath and os.path.exists(temp_query_audio_filepath):
+                        os.remove(temp_query_audio_filepath)
+                        print(
+                            f"Cleaned up temporary query audio: {temp_query_audio_filepath}")
+            else:
+                print_and_speak("No query audio was recorded for this chat session.",
+                                tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+
+        elif choice == '4':
+            print_and_speak("\nYou have chosen the Conversational Neo4j Query mode.",
+                            tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+
+            # No authentication needed for this mode, always use a generic ID
+            recognized_user_id = "vocal_user"
+            personalization_embedding = None  # No personalization without authentication
+
+            while True:
+                print_and_speak("What's your initial question for the knowledge graph?",
+                                tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                print_and_speak("You can say 'menu' at any time to go back to the main menu.",
+                                tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+
+                recorded_initial_query_audio = record_audio(
+                    duration_seconds=config.RECORDING_DURATION_SECONDS,
+                    prompt_message=f"Speak your initial question (or 'menu') for {config.RECORDING_DURATION_SECONDS} seconds."
+                )
+
+                initial_query_text = ""
+                temp_initial_query_filepath = None
+
+                if recorded_initial_query_audio is not None:
+                    try:
+                        temp_initial_query_output_filename = "conversational_initial_query_temp.wav"
+                        temp_initial_query_filepath = os.path.join(
+                            config.AUDIO_RECORDINGS_DIR, temp_initial_query_output_filename)
+                        sf.write(temp_initial_query_filepath,
+                                 recorded_initial_query_audio, config.SAMPLE_RATE)
+                        print(
+                            f"Temporary audio saved for initial query: {temp_initial_query_filepath}")
+
+                        raw_transcription_result = transcribe_audio(
+                            asr_model, temp_initial_query_filepath)
+
+                        if isinstance(raw_transcription_result, list) and len(raw_transcription_result) > 0:
+                            initial_query_text = raw_transcription_result[0].strip(
+                            )
+                            print(
+                                f"The Transcription is: \"['{initial_query_text}']\"")
+                        elif raw_transcription_result is not None:
+                            initial_query_text = raw_transcription_result.strip()
+                            print(
+                                f"The Transcription is: \"{initial_query_text}\"")
+                        else:
+                            print_and_speak("I couldn't transcribe your speech. Please try again.",
+                                            tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                            continue
+
+                    finally:
+                        if temp_initial_query_filepath and os.path.exists(temp_initial_query_filepath):
+                            os.remove(temp_initial_query_filepath)
+                            print(
+                                f"Cleaned up temporary initial query audio: {temp_initial_query_filepath}")
+                else:
+                    print_and_speak("No audio recorded for your initial query. Please try again.",
+                                    tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                    continue
+
+                lower_initial_query = initial_query_text.lower()
+                if "menu" in lower_initial_query:
+                    print_and_speak("Returning to the main menu.",
+                                    tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                    break  # Exit the main conversational loop for this option
+                elif not initial_query_text:
+                    print_and_speak("I didn't hear a question. Please try again.",
+                                    tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                    continue
+
+                print_and_speak("Processing your question...", tts_model,
+                                vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                chatbot_response = await query_neo4j_rag(initial_query_text, recognized_user_id, tts_model, vocoder_model)
+                print_and_speak(f"\n--- Chatbot: {chatbot_response}",
+                                tts_model, vocoder_model, personalization_embedding, USE_TTS_FOR_ANSWERS)
+
+                # Now, enter the continuous follow-up conversation loop
+                while True:
+                    print_and_speak("What else would you like to know about this topic?",
+                                    tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+
+                    recorded_follow_up_audio = record_audio(
+                        duration_seconds=config.RECORDING_DURATION_SECONDS,
+                        prompt_message=f"Speak your follow-up question (or 'back' or 'menu') for {config.RECORDING_DURATION_SECONDS} seconds."
+                    )
+
+                    follow_up_query_text = ""
+                    temp_follow_up_audio_filepath = None
+
+                    if recorded_follow_up_audio is not None:
+                        try:
+                            temp_follow_up_output_filename = "conversational_follow_up_temp.wav"
+                            temp_follow_up_audio_filepath = os.path.join(
+                                config.AUDIO_RECORDINGS_DIR, temp_follow_up_output_filename)
+                            sf.write(temp_follow_up_audio_filepath,
+                                     recorded_follow_up_audio, config.SAMPLE_RATE)
+                            print(
+                                f"Temporary audio saved for follow-up: {temp_follow_up_audio_filepath}")
+
+                            raw_transcription_result = transcribe_audio(
+                                asr_model, temp_follow_up_audio_filepath)
+
+                            if isinstance(raw_transcription_result, list) and len(raw_transcription_result) > 0:
+                                follow_up_query_text = raw_transcription_result[0].strip(
+                                )
+                                print(
+                                    f"The Transcription is: \"['{follow_up_query_text}']\"")
+                            elif raw_transcription_result is not None:
+                                follow_up_query_text = raw_transcription_result.strip()
+                                print(
+                                    f"The Transcription is: \"{follow_up_query_text}\"")
+                            else:
+                                print_and_speak("I couldn't transcribe your speech. Please try again.",
+                                                tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                                continue
+
+                        finally:
+                            if temp_follow_up_audio_filepath and os.path.exists(temp_follow_up_audio_filepath):
+                                os.remove(temp_follow_up_audio_filepath)
+                                print(
+                                    f"Cleaned up temporary follow-up audio: {temp_follow_up_audio_filepath}")
+                    else:
+                        print_and_speak("No audio recorded for follow-up. Please try again.",
+                                        tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                        continue
+
+                    lower_follow_up_query = follow_up_query_text.lower()
+                    if "back" in lower_follow_up_query:
+                        print_and_speak("Okay, let's go back to asking a new question for the knowledge graph.",
+                                        tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                        # Exit inner (follow-up) loop, go back to outer loop for new initial query
+                        break
+                    elif "menu" in lower_follow_up_query:
+                        print_and_speak("Returning to the main menu.",
+                                        tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                        return  # Exit both loops and return to interactive_main's top level
+                    elif not follow_up_query_text:
+                        print_and_speak("I didn't hear a question. Please try again.",
+                                        tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                        continue
+
+                    # Process the spoken follow-up query
+                    print_and_speak("Processing your follow-up question...",
+                                    tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                    chatbot_response = await query_neo4j_rag(follow_up_query_text, recognized_user_id, tts_model, vocoder_model)
+                    print_and_speak(f"\n--- Chatbot: {chatbot_response}",
+                                    tts_model, vocoder_model, personalization_embedding, USE_TTS_FOR_ANSWERS)
+            # End of the outer conversational loop for choice 4
+
         elif choice == '5':
-            print_and_speak("\n--- Transcribe Audio File (ASR Only) ---",
+            print_and_speak("\nYou have chosen to transcribe with ASR an audio file.",
                             tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
             input_audio_path = input(
                 "Enter path to audio file for transcription: ").strip()
             if os.path.exists(input_audio_path):
-                # Ensure transcribe_audio function returns the text
-                transcribed_text = transcribe_audio(
+                transcribed_text_list = transcribe_audio(
                     asr_model, input_audio_path)
+
+                transcribed_text = ""
+                if isinstance(transcribed_text_list, list) and len(transcribed_text_list) > 0:
+                    transcribed_text = transcribed_text_list[0].strip()
+                elif transcribed_text_list is not None:
+                    transcribed_text = str(transcribed_text_list).strip()
+
                 if transcribed_text:
                     print(f"Transcription: {transcribed_text}")
-                    print_and_speak(f"Transcription complete: {transcribed_text}",
+                    print_and_speak(f"The transcription is: {transcribed_text}",
                                     tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
                 else:
                     print_and_speak("Failed to transcribe audio.",
                                     tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
             else:
-                print_and_speak(f"Error: File not found at {input_audio_path}.",
+                print_and_speak(f"Error: File not found at the path.",
                                 tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                print(f"Error: File not found at {input_audio_path}.")
 
-        # Original option 4, now 6
         elif choice == '6':
-            print_and_speak("\n--- Convert Audio to Embedding ---",
+            print_and_speak("\nYou have chosen to convert an audio to an embedding representation.",
                             tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
             input_audio_path = input(
                 "Enter path to audio file to convert to embedding: ").strip()
@@ -1013,23 +1311,26 @@ async def interactive_main():  # Changed to async to support await in query_neo4
                 if not output_filename.endswith(('.pkl', '.npy')):
                     output_filename += ".pkl"
 
-                # Check if an embedding was successfully extracted (function should return it)
                 extracted_emb = extract_speaker_embedding(
                     verification_model, input_audio_path, embedding_output_filename=output_filename, save_embedding=True)
 
                 if extracted_emb is not None:
-                    print_and_speak(f"Embedding successfully created and saved to {os.path.join(EMBEDDING_OUTPUT_DIR, output_filename)}.",
+                    print_and_speak(f"Embedding successfully created and saved.",
                                     tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                    print(
+                        f"Embedding successfully created and saved to {os.path.join(config.EMBEDDING_OUTPUT_DIR, output_filename)}.")
                 else:
-                    print_and_speak(f"Failed to create embedding from {input_audio_path}.",
+                    print_and_speak(f"Failed to create embedding from the path.",
                                     tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                    print(
+                        f"Failed to create embedding from {input_audio_path}.")
             else:
-                print_and_speak(f"Error: File not found at {input_audio_path}.",
+                print_and_speak(f"Error: File not found at the path.",
                                 tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                print(f"Error: File not found at {input_audio_path}.")
 
-        # Original option 5, now 7
         elif choice == '7':
-            print_and_speak("\n--- Synthesize Speech from Text (TTS Only) ---",
+            print_and_speak("\nYou have chosen to synthesize speech from text.",
                             tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
             text_to_synthesize = input("Enter text to synthesize: ").strip()
             if not text_to_synthesize:
@@ -1044,7 +1345,7 @@ async def interactive_main():  # Changed to async to support await in query_neo4
                 embedding_id = input(
                     "Enter the ID of the registered speaker (e.g., 'Alice'): ").strip()
                 embedding_filepath = os.path.join(
-                    EMBEDDING_OUTPUT_DIR, f"{embedding_id}_embedding.pkl")
+                    config.EMBEDDING_OUTPUT_DIR, f"{embedding_id}_embedding.pkl")
                 if os.path.exists(embedding_filepath):
                     try:
                         with open(embedding_filepath, 'rb') as f:
@@ -1052,9 +1353,11 @@ async def interactive_main():  # Changed to async to support await in query_neo4
                         print_and_speak(f"Using '{embedding_id}' for TTS personalization.",
                                         tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
                     except Exception as e:
-                        print_and_speak(f"Error loading embedding for '{embedding_id}': {e}. Using default voice.",
+                        print_and_speak(f"Error loading embedding. Using default voice.",
                                         tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
-                        speaker_emb_for_tts = None  # Ensure it's reset if load fails
+                        print(
+                            f"Error loading embedding for '{embedding_id}': {e}. Using default voice.")
+                        speaker_emb_for_tts = None
                 else:
                     print_and_speak(f"Embedding for '{embedding_id}' not found. Using default voice.",
                                     tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
@@ -1068,43 +1371,40 @@ async def interactive_main():  # Changed to async to support await in query_neo4
 
             synthesize_speech(tts_model, vocoder_model, text_to_synthesize,
                               speaker_emb_for_tts, output_filename=output_filename_tts)
-            print_and_speak(f"Speech synthesized to {os.path.join(AUDIO_RECORDINGS_DIR, output_filename_tts)}",
+            print_and_speak(f"Speech synthesized and saved.",
                             tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+            print(
+                f"Speech synthesized to {os.path.join(config.AUDIO_RECORDINGS_DIR, output_filename_tts)}")
 
-        # Original option 6, now 8
         elif choice == '8':
-            print_and_speak("\n--- Registered Speaker Embeddings ---",
+            print_and_speak("\nYou have chosen to register speaker embeddings",
                             tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
             registered_files = [f for f in os.listdir(
-                EMBEDDING_OUTPUT_DIR) if f.endswith(('.pkl', '.npy'))]
+                config.EMBEDDING_OUTPUT_DIR) if f.endswith(('.pkl', '.npy'))]
             if registered_files:
                 for i, filename in enumerate(registered_files):
                     user_id = filename.replace("_embedding.pkl", "")
-                    # Filter out any non-embedding files if any
                     if "_embedding.pkl" in filename or "_embedding.npy" in filename:
                         print(f" {i+1}. {user_id} ({filename})")
 
-                # Speak out a summary for TTS
                 if registered_files:
                     speakable_list = ", ".join([f.replace("_embedding.pkl", "").replace(
                         "_embedding.npy", "") for f in registered_files])
-                    print_and_speak(f"Currently registered speakers are: {speakable_list}.",
-                                    tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                    print(
+                        f"Currently registered speakers are: {speakable_list}.")
             else:
                 print_and_speak(
                     "No speaker embeddings registered yet.", tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
 
-        # Original option 7, now 9
         elif choice == '9':
-            print_and_speak("\n--- Delete Registered Speaker Embedding ---",
+            print_and_speak("\nYou have chosen to delete a speaker embedding",
                             tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
             user_id_to_delete = input(
                 "Enter the ID of the speaker to delete (e.g., 'Alice'): ").strip()
             embedding_filepath = os.path.join(
-                EMBEDDING_OUTPUT_DIR, f"{user_id_to_delete}_embedding.pkl")
-            # Also check for .npy if you plan to save them that way
+                config.EMBEDDING_OUTPUT_DIR, f"{user_id_to_delete}_embedding.pkl")
             embedding_filepath_npy = os.path.join(
-                EMBEDDING_OUTPUT_DIR, f"{user_id_to_delete}_embedding.npy")
+                config.EMBEDDING_OUTPUT_DIR, f"{user_id_to_delete}_embedding.npy")
 
             found_file = False
             if os.path.exists(embedding_filepath):
@@ -1121,35 +1421,32 @@ async def interactive_main():  # Changed to async to support await in query_neo4
                 print_and_speak(
                     f"Embedding for '{user_id_to_delete}' not found.", tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
 
-        # Original option 8, now 10
         elif choice == '10':
-            print_and_speak("\n--- Clear ALL Registered Speaker Embeddings ---",
+            print_and_speak("\nYou have chosen to clear all speaker embeddings",
                             tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
             confirm = input(
                 "Are you sure you want to delete ALL registered speaker embeddings? This cannot be undone! (yes/no): ").strip().lower()
             if confirm == 'yes':
                 try:
-                    # Remove the directory and recreate it to ensure it's empty
-                    if os.path.exists(EMBEDDING_OUTPUT_DIR):
-                        shutil.rmtree(EMBEDDING_OUTPUT_DIR)
-                    os.makedirs(EMBEDDING_OUTPUT_DIR, exist_ok=True)
+                    if os.path.exists(config.EMBEDDING_OUTPUT_DIR):
+                        shutil.rmtree(config.EMBEDDING_OUTPUT_DIR)
+                    os.makedirs(config.EMBEDDING_OUTPUT_DIR, exist_ok=True)
                     print_and_speak("All registered speaker embeddings have been cleared.",
                                     tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
                 except Exception as e:
-                    print_and_speak(f"Error clearing embeddings: {e}",
+                    print_and_speak(f"Error clearing embeddings",
                                     tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
+                    print(f"Error clearing embeddings: {e}")
             else:
                 print_and_speak(
                     "Operation cancelled. No embeddings were deleted.", tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
 
-        # Original option 9, now 11
         elif choice == '11':
             USE_TTS_FOR_ANSWERS = not USE_TTS_FOR_ANSWERS
             status = "ENABLED" if USE_TTS_FOR_ANSWERS else "DISABLED"
             print_and_speak(f"Text to Speech for computer answers is now {status}.",
                             tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
 
-        # Original option 0, remains 0
         elif choice == '0':
             print_and_speak("\nExiting Vocal Chatbot System. Goodbye!",
                             tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
@@ -1160,4 +1457,7 @@ async def interactive_main():  # Changed to async to support await in query_neo4
                 "Invalid choice. Please enter a number from the menu.", tts_model, vocoder_model, None, USE_TTS_FOR_ANSWERS)
 
 if __name__ == "__main__":
+    os.makedirs(config.AUDIO_RECORDINGS_DIR, exist_ok=True)
+    os.makedirs(config.EMBEDDING_OUTPUT_DIR, exist_ok=True)
+
     asyncio.run(interactive_main())
