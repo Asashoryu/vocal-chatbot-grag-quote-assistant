@@ -1,13 +1,8 @@
 from neo4j import GraphDatabase
-# Corrected import for ServiceUnavailable
 from neo4j.exceptions import ServiceUnavailable
 
-# --- Configuration ---
-# IMPORTANT: Replace these with your actual Neo4j connection details.
-# If running locally with default settings, these might be correct.
 NEO4J_URI = "bolt://localhost:7687"
 NEO4J_USERNAME = "neo4j"
-# <--- REPLACE WITH YOUR ACTUAL NEO4J PASSWORD
 NEO4J_PASSWORD = "amonolexandr"
 
 # Mapping of user-friendly entity types to their corresponding Full-Text Index names
@@ -95,7 +90,6 @@ def search_entity(driver, entity_choice: str, substring: str, k: int = 10):
         search_term = f"{substring}*"
 
         # Cypher query for full-text search
-        # The CASE statement dynamically selects the correct property based on node label
         query = f"""
         CALL db.index.fulltext.queryNodes('{index_name}', $searchTerm) YIELD node, score
         RETURN labels(node) AS NodeType,

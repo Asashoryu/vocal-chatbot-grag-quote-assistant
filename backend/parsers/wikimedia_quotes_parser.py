@@ -10,18 +10,14 @@ from unidecode import unidecode
 from langdetect import detect
 import unwiki
 
-# === Configuration ===
 input_file = "/home/olexandro/NLP/vocal-chatbot-grag-quote-assistant/storage/xml/wikimedia_quotes.xml"
 MAX_LINE_LEN = 100000
 cutoffArg = MAX_LINE_LEN
 langArg = "en"
 output_json_file = "quotes_output.jsonl"
 
-# === Regex pattern for section headers ===
 section_header_pattern = re.compile(r'^={3,}\s*.*?\s*={3,}$')
 
-
-# === Utilities ===
 
 def clean_text(text, remove_prefix_len=0):
     """Clean a line: unwiki, remove HTML, unicode, excess whitespace, and optional prefix."""
@@ -63,8 +59,6 @@ def strip_tags(html):
     stripper.feed(html)
     return stripper.get_data()
 
-
-# === Main Quote Extraction ===
 
 def writeQuotes(content):
     quoteList = []
@@ -135,8 +129,6 @@ def writeQuotes(content):
     return quoteList
 
 
-# === XML Parsing Handler ===
-
 def handle(_, value):
     try:
         content = str(value['revision']['text']).split('\\n')
@@ -158,8 +150,6 @@ def handle(_, value):
         pass
     return True
 
-
-# === Run the parser ===
 
 try:
     xmltodict.parse(open(input_file, "rb"), item_depth=2, item_callback=handle)

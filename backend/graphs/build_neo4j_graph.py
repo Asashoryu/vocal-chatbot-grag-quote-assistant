@@ -66,4 +66,4 @@ if __name__ == "__main__":
     builder = QuoteGraphBuilder(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
     builder.create_graph(JSONL_PATH)
     builder.close()
-    print("✅ Graph successfully built from JSONL file.")
+    print("SUCCESS: Graph successfully built from JSONL file.")

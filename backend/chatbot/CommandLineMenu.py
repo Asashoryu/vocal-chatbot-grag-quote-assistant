@@ -2,42 +2,36 @@
 
 import os
 import soundfile as sf
-import pickle as pkl  # Still needed for loading verification embeddings
+import pickle as pkl
 import shutil
 import asyncio
-import numpy as np  # Import numpy for embedding handling
+import numpy as np
 import traceback
 
-# --- Import your configuration ---
 import config
 import torch
 
-# --- Import the globally accessible AudioManager and ModelLoaderManager instances ---
 from AudioManager import audio_manager
 from ModelLoaderManager import model_loader_manager
 from SpeakerVerifier import SpeakerVerifier
 
-# Import the modified ConversationalNeo4jChatbot
 from ConversationalNeo4jChatbot import ConversationalNeo4jChatbot
 
 
 class CommandLineMenu:
     """
     Manages the command-line interface and interactions for the Vocal Chatbot System.
-    It orchestrates calls to AudioManager, SpeakerVerifier, and ConversationalNeo4jChatbot.
     """
 
     def __init__(self, neo4j_uri: str, neo4j_username: str, neo4j_password: str,
                  entity_index_map: dict, speaker_verification_model):
         self.running = True
 
-        # Store the received parameters
         self.neo4j_uri = neo4j_uri
         self.neo4j_username = neo4j_username
         self.neo4j_password = neo4j_password
         self.entity_index_map = entity_index_map
 
-        # Initialize SpeakerVerifier with the actual loaded model
         self.speaker_verifier = SpeakerVerifier(
             model=speaker_verification_model,
             audio_manager_instance=audio_manager
@@ -45,7 +39,6 @@ class CommandLineMenu:
         print(f"\nDEBUG: CommandLineMenu: SpeakerVerifier initialized.")
 
         # Initialize core components
-        # Pass the stored parameters to ConversationalNeo4jChatbot
         self.neo4j_chatbot = ConversationalNeo4jChatbot(
             neo4j_uri=self.neo4j_uri,
             neo4j_username=self.neo4j_username,
@@ -148,7 +141,7 @@ class CommandLineMenu:
         else:
             audio_manager.print_and_speak(
                 "No audio recorded for menu choice. Please try again.")
-            return  # Go back to main loop for another attempt
+            return
 
         lower_transcribed_menu_choice = transcribed_menu_choice.lower()
         for word, digit in self.spoken_numbers_map.items():
@@ -162,7 +155,7 @@ class CommandLineMenu:
         if not choice:
             audio_manager.print_and_speak(
                 "I didn't understand your choice. Please try speaking clearly a number from the menu.")
-            return  # Go back to main loop
+            return
 
         print(
             f"User's spoken choice (transcribed): {transcribed_menu_choice} -> Processed Choice: {choice}")
@@ -179,19 +172,16 @@ class CommandLineMenu:
             await self._start_voice_chat()
         elif choice == '4':
             await self._start_conversational_neo4j_query()
-        # Option 5 is now "Select TTS Answer Voice"
         elif choice == '5':
             await self._select_tts_voice_from_embedding()
-        # Option 6 is now "List all registered speaker embeddings"
         elif choice == '6':
             self._list_registered_speakers()
-        # Option 7 is now "Delete a registered speaker embedding"
         elif choice == '7':
             self._delete_speaker_embedding()
         elif choice == '0':
             audio_manager.print_and_speak(
                 "\nExiting Vocal Chatbot System. Goodbye!")
-            exit()  # Exit the application
+            exit()
         else:
             audio_manager.print_and_speak(
                 "Invalid choice. Please enter a number from the menu.")
@@ -271,7 +261,6 @@ class CommandLineMenu:
         )
 
         temp_audio_filepath = None
-        # To store the extracted embedding for finding closest FastPitch ID
         user_extracted_embedding = None
 
         if recorded_auth_audio_data is not None:
@@ -284,7 +273,7 @@ class CommandLineMenu:
                 print(
                     f"Temporary audio saved for authentication: {temp_audio_filepath}")
 
-                # First, extract the embedding of the new voice for authentication
+                # Extract the embedding of the new voice for authentication
                 user_extracted_embedding = self.speaker_verifier.extract_speaker_embedding(
                     audio_filepath=temp_audio_filepath,
                     save_embedding=False  # We just need the embedding in memory for now
@@ -294,10 +283,9 @@ class CommandLineMenu:
                     audio_manager.print_and_speak(
                         "Failed to extract voice embedding for authentication. Cannot authenticate.")
                     print("Error: Could not extract user voice embedding.")
-                    return  # Exit if embedding extraction fails
+                    return
 
-                # Now, use the extracted embedding (via the audio file path) for verification
-                # FIX: Added `_` to unpack the 4th return value (best_matching_embedding_data)
+                # Use the extracted embedding for verification (via the audio file path)
                 is_identified, identified_user_filename, score, _, all_speaker_results = \
                     self.speaker_verifier.verify_speaker_against_folder_embeddings(
                         new_voice_audio_path=temp_audio_filepath
@@ -366,9 +354,7 @@ class CommandLineMenu:
             prompt_message=f"Speak for {audio_manager.recording_duration_seconds} seconds to authenticate for chat."
         )
 
-        recognized_user_id = None
         temp_auth_audio_filepath = None
-        # To store the extracted embedding for finding closest FastPitch ID
         user_extracted_embedding = None
 
         if recorded_chat_auth_audio_data is not None:
@@ -381,33 +367,30 @@ class CommandLineMenu:
                 print(
                     f"Temporary audio saved for chat authentication: {temp_auth_audio_filepath}")
 
-                # First, extract the embedding of the new voice for authentication and potential TTS matching
-                # We need to get the embedding itself, not just the verification result
                 user_extracted_embedding = self.speaker_verifier.extract_speaker_embedding(
                     audio_filepath=temp_auth_audio_filepath,
-                    save_embedding=False  # We just need the embedding in memory for now
+                    save_embedding=False
                 )
 
                 if user_extracted_embedding is None:
                     audio_manager.print_and_speak(
                         "Failed to extract voice embedding for authentication. Cannot start chat.")
                     print("Error: Could not extract user voice embedding.")
-                    return  # Exit if embedding extraction fails
+                    return
 
-                # Now, use the extracted embedding for verification against registered users
-                is_identified, identified_user_filename, score, _ = self.speaker_verifier.verify_speaker_against_folder_embeddings(
-                    # This path is still used for the verification process
-                    new_voice_audio_path=temp_auth_audio_filepath
-                )
+                is_identified, identified_user_filename, score, _, _ = \
+                    self.speaker_verifier.verify_speaker_against_folder_embeddings(
+                        new_voice_audio_path=temp_auth_audio_filepath
+                    )
 
                 if is_identified:
-                    # Extract user ID from the identified filename (e.g., "Alice_embedding.pkl" -> "Alice")
                     recognized_user_name = identified_user_filename.replace(
                         "_embedding.pkl", "").replace("_embedding.npy", "")
                     audio_manager.print_and_speak(
                         f"Authenticated as: {recognized_user_name}. Starting conversation...")
+                    print(
+                        f"Authentication successful. User: {recognized_user_name}. Score: {score:.4f}")
 
-                    # Find the closest FastPitch speaker ID based on the authenticated user's voice embedding
                     closest_fastpitch_id = self.speaker_verifier.get_closest_fastpitch_speaker_id_from_embedding(
                         user_extracted_embedding
                     )
@@ -420,23 +403,18 @@ class CommandLineMenu:
                     else:
                         audio_manager.print_and_speak(
                             "Could not find a matching FastPitch speaker ID. Using default TTS voice (ID 0).")
-                        audio_manager.set_global_speaker_id(
-                            0)  # Fallback to default speaker 0
+                        audio_manager.set_global_speaker_id(0)
 
-                    # Start the conversational loop.
-                    # The `start_conversation_loop` method no longer accepts initial_user_id.
                     await self.neo4j_chatbot.start_conversation_loop(recognized_user_name)
 
                     audio_manager.print_and_speak(
-                        f"Chat session for {recognized_user_id} ended.")
-
+                        f"Chat session for {recognized_user_name} ended.")
                 else:
                     audio_manager.print_and_speak(
                         "Authentication failed. Cannot start chat. Returning to the menu.")
                     print("Authentication failed.")
-                    return  # Go back to main menu
+                    return
             finally:
-                # Clean up the temporary audio file used for authentication
                 if temp_auth_audio_filepath and os.path.exists(temp_auth_audio_filepath):
                     os.remove(temp_auth_audio_filepath)
                     print(
@@ -444,7 +422,6 @@ class CommandLineMenu:
         else:
             audio_manager.print_and_speak(
                 "Authentication audio not recorded. Cannot start chat.")
-            return  # Go back to main menu
 
     async def _start_conversational_neo4j_query(self):
         """
@@ -475,7 +452,6 @@ class CommandLineMenu:
                 f"Error: File not found at the path.")
             print(f"Error: File not found at {input_audio_path}.")
 
-    # <--- NEW/MODIFIED FUNCTION
     async def _select_tts_voice_from_embedding(self):
         """
         Handles the 'Select TTS Answer Voice from FastPitch Embedding' menu option.
@@ -519,7 +495,7 @@ class CommandLineMenu:
         available_speaker_ids.sort()
 
         for i, speaker_id in enumerate(available_speaker_ids):
-            print(f" {i+1}. FastPitch Speaker ID: {speaker_id}")
+            print(f" {i}. FastPitch Speaker ID: {speaker_id}")
 
         print("\nType 'cancel' to return to the main menu.")
 
@@ -587,8 +563,8 @@ class CommandLineMenu:
             return
 
         # Initialize defaults
-        selected_speaker_id = 0  # Default FastPitch speaker ID
-        selected_speaker_embedding_np = None  # No custom embedding by default
+        selected_speaker_id = 0
+        selected_speaker_embedding_np = None
 
         use_custom_voice_input = input(
             "Want to use a specific registered custom voice for this synthesis (overriding default)? (y/n): ").strip().lower()
@@ -616,7 +592,8 @@ class CommandLineMenu:
                     print(f" {i+1}. {user_id}")
 
                 chosen_user_id = None
-                while chosen_user_id is None:  # Loop until a valid choice or 'cancel'
+                # Loop until a valid choice or 'cancel'
+                while chosen_user_id is None:
                     temp_choice_input = input(
                         "Enter the number or ID of the speaker for this synthesis (or type 'cancel' to use default): ").strip().lower()
 
@@ -638,7 +615,8 @@ class CommandLineMenu:
                             if uid.lower() == temp_choice_input:
                                 chosen_user_id = uid
                                 break
-                        if chosen_user_id is None:  # If no match was found after checking all options
+                        # If no match was found after checking all options
+                        if chosen_user_id is None:
                             audio_manager.print_and_speak(
                                 "I didn't understand that. Please enter a number, ID, or 'cancel'.")
 

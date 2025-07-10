@@ -2,17 +2,16 @@
 
 import os
 import soundfile as sf
-import pickle as pkl  # Assuming pkl is used for embeddings if needed for personalization
-import asyncio  # Needed for async Ollama client interactions
-import numpy as np  # REQUIRED: For speaker embedding type hinting
-from typing import Optional  # REQUIRED: For optional parameters
+import pickle as pkl
+import asyncio
+import numpy as np
+from typing import Optional
 
 # --- Import the globally accessible AudioManager instance ---
 from AudioManager import audio_manager
 
-# Make sure Neo4jConnector and ollama (for call_local_llm) are imported and available
-from Neo4jConnector import Neo4jConnector  # Assuming you have this
-import ollama  # Import the ollama library
+from Neo4jConnector import Neo4jConnector
+import ollama
 
 
 class ConversationalNeo4jChatbot:
@@ -48,8 +47,8 @@ class ConversationalNeo4jChatbot:
         try:
             self._ollama_client = ollama.AsyncClient(
                 host='http://localhost:11434')
-            # Ensure this model is pulled deepseek-r1:1.5b "tinyllama" "gemma:2b"
-            self.ollama_model_name = "llama3.2:1b"
+            # Ensure this model is pulled "deepseek-r1:1.5b" "tinyllama" "gemma:2b"
+            self.ollama_model_name = "deepseek-r1:1.5b"
             print(
                 f"Ollama client initialized with default model '{self.ollama_model_name}'.")
         except Exception as e:
@@ -67,27 +66,22 @@ class ConversationalNeo4jChatbot:
 
         self._conversation_history = []
 
-        # --- MODIFICATION START: New instance variables for current session's user and embedding ---
+        # New instance variables for current session's user and embedding
         self._current_user_name: str = "Guest"  # Initialize with a default value
-        # Initialize as None
         self._current_speaker_embedding: Optional[np.ndarray] = None
-        # --- MODIFICATION END ---
 
         self.neo4j_connector = Neo4jConnector(
             self.neo4j_uri, self.neo4j_username, self.neo4j_password)
 
-        # >>> DEBUG: Print entity_index_map at init to confirm its content
         print(
             f"DEBUG: Chatbot initialized with entity_index_map: {self.entity_index_map}")
 
-        # --- MODIFICATION START: Define spoken_exit_commands ---
         self.spoken_exit_commands = {
             "two": "two",
             "exit": "two",
             "one": "one",
             "": ""  # Handle empty transcription
         }
-        # --- MODIFICATION END ---
 
     async def _default_ollama_call(self, prompt: str) -> str:
         """
@@ -106,9 +100,6 @@ class ConversationalNeo4jChatbot:
             return "Error: Ollama model name not set. Cannot make LLM call."
 
         try:
-            # >>> DEBUG: Print the prompt sent to Ollama (truncated for cleaner logs)
-            # print(
-            #     f"DEBUG: _default_ollama_call: Sending prompt :\n{prompt}...")
             response = await self._ollama_client.chat(
                 model=self.ollama_model_name,
                 messages=[
@@ -116,17 +107,11 @@ class ConversationalNeo4jChatbot:
                 ],
                 stream=False  # Ensures a single, complete response object
             )
-            # >>> DEBUG: Print raw response from Ollama
-            # print(
-            # f"DEBUG: _default_ollama_call: Raw Ollama response: {response}")
 
             llm_response_content = ""  # Use a new variable name to avoid confusion
 
-            # >>> MODIFICATION STARTS HERE <<<
-            # Access attributes using dot notation (response.message.content)
             if hasattr(response, 'message') and hasattr(response.message, 'content'):
                 llm_response_content = response.message.content
-            # >>> MODIFICATION ENDS HERE <<<
 
             if llm_response_content:
                 return llm_response_content
@@ -144,15 +129,12 @@ class ConversationalNeo4jChatbot:
                 f"ERROR: _default_ollama_call: An unexpected error occurred while calling the local LLM: {e}. Check Ollama server status or network.")
             return f"An unexpected error occurred while calling the local LLM: {e}. Check Ollama server status or network."
 
-    # --- MODIFICATION START: Add user_id parameter to _process_vocal_input ---
     async def _process_vocal_input(self, prompt_message: str, user_id: str) -> str:
         """
         Handles recording and transcribing user's vocal input using AudioManager.
         Returns the transcribed text or an empty string if transcription fails.
         Now takes user_id for better temporary file naming.
         """
-        # print(
-        #     f"DEBUG: _process_vocal_input: Prompting for audio: '{prompt_message}' for user '{user_id}'")
         recorded_audio_data = audio_manager.record_audio(
             prompt_message=prompt_message
         )
@@ -162,8 +144,7 @@ class ConversationalNeo4jChatbot:
 
         if recorded_audio_data is not None:
             try:
-                # Use user_id in temp filename to prevent conflicts if multiple users are handled concurrently (future-proofing)
-                # Modified filename for clarity and uniqueness
+                # Use user_id in temp filename to prevent conflicts if multiple users are handled concurrently
                 temp_output_filename = "temp_vocal_input.wav"
                 temp_audio_filepath = os.path.join(
                     audio_manager.audio_records_dir, temp_output_filename)
@@ -195,8 +176,7 @@ class ConversationalNeo4jChatbot:
                 "No audio recorded. Please try again.")  # Use current embedding
             print("DEBUG: _process_vocal_input: No audio data recorded.")
 
-        return transcribed_text.strip()  # Ensure stripped output
-    # --- MODIFICATION END ---
+        return transcribed_text.strip()
 
     def _search_entity(self, driver, entity_choice: str, substring: str, k: int = 10):
         """
@@ -209,7 +189,6 @@ class ConversationalNeo4jChatbot:
                 "ERROR: _search_entity: Neo4j driver is not initialized. Returning empty list.")
             return []
 
-        # >>> MODIFICATION: Ensure 'Quote' name is correctly matched from entity_index_map
         quote_index_info = next(
             (v for k_map, v in self.entity_index_map.items() if v.get("name") == "Quote"), None)
 
@@ -218,7 +197,6 @@ class ConversationalNeo4jChatbot:
                   "Please ensure it contains an entry like {'name': 'Quote', 'index': 'quoteTextsIndex'}.")
             return []
 
-        # This should be your full-text index name for Quotes
         index_name = quote_index_info["index"]
         entity_name = quote_index_info["name"]
 
@@ -228,13 +206,12 @@ class ConversationalNeo4jChatbot:
         results = []
 
         with driver.session() as session:
-            # >>> MODIFICATION: Add defensive check for empty substring
             if not substring or not substring.strip():
                 print(
                     "DEBUG: _search_entity: Substring is empty or whitespace. Returning empty results.")
                 return []
 
-            search_term = f"{substring}*"  # Correctly applies wildcard
+            search_term = f"{substring}*"
 
             query = f"""
             CALL db.index.fulltext.queryNodes('{index_name}', $searchTerm) YIELD node AS quote, score
@@ -251,7 +228,6 @@ class ConversationalNeo4jChatbot:
             ORDER BY score DESC
             LIMIT $k
             """
-            # >>> DEBUG: Print the actual query and parameters being sent to Neo4j
             print(f"\nDEBUG: _search_entity: Executing Cypher Query:\n{query}")
             print(
                 f"DEBUG: _search_entity: With parameters: searchTerm='{search_term}', k={k}")
@@ -261,9 +237,6 @@ class ConversationalNeo4jChatbot:
                 found_records_count = 0
                 for record in result:
                     found_records_count += 1
-                    # >>> DEBUG: Print raw record from Neo4j
-                    # print(
-                    #     f"DEBUG: _search_entity: Raw record from Neo4j: {record.data()}")
 
                     authors = [a for a in record["Authors"] if a is not None]
                     contexts = [c for c in record["Contexts"] if c is not None]
@@ -277,16 +250,12 @@ class ConversationalNeo4jChatbot:
                         "Details": details
                     }
                     results.append(processed_record)
-                    # >>> DEBUG: Print processed record
-                    # print(
-                    #     f"DEBUG: _search_entity: Appended formatted result: {processed_record}")
 
                 if found_records_count == 0:
                     print(
                         f"DEBUG: _search_entity: Neo4j query returned no records for substring '{substring}'.")
 
             except Exception as e:
-                # >>> DEBUG: Detailed error message for Neo4j query failure
                 print(
                     f"ERROR: _search_entity: Caught an exception during Neo4j query execution: {e}")
                 print("INFO: Please ensure the full-text index is correctly named and your graph schema matches relationships and properties.")
@@ -307,7 +276,7 @@ class ConversationalNeo4jChatbot:
         thinking_end_index = llm_raw_output.find(thinking_end_tag)
 
         thinking_part = ""
-        answer_part = llm_raw_output  # Default to full output if tags not found
+        answer_part = llm_raw_output
 
         if thinking_start_index != -1 and thinking_end_index != -1 and thinking_end_index > thinking_start_index:
             thinking_part = llm_raw_output[thinking_start_index +
@@ -315,7 +284,6 @@ class ConversationalNeo4jChatbot:
             answer_part = llm_raw_output[thinking_end_index +
                                          len(thinking_end_tag):].strip()
 
-        # >>> DEBUG: Print extracted parts
         print(
             f"DEBUG: _extract_llm_parts: Thinking part: \n'{thinking_part}\n...'")
         print(
@@ -323,7 +291,6 @@ class ConversationalNeo4jChatbot:
 
         return thinking_part, answer_part
 
-    # --- MODIFICATION START: Add user_id parameter to _generate_llm_response ---
     async def _generate_llm_response(self, user_query: str, force_graph_query: bool = True, user_id: str = "Guest") -> str:
         """
         Queries Neo4j for context (if force_graph_query is True) or uses existing context,
@@ -361,9 +328,6 @@ class ConversationalNeo4jChatbot:
                     search_results = self._search_entity(
                         self.neo4j_connector.get_driver(), None, search_term, k=5)
 
-                    # print(
-                    #     f"DEBUG: _generate_llm_response: Raw search results from _search_entity: {search_results}")
-
                     if search_results:
                         formatted_results = []
                         for i, res in enumerate(search_results):
@@ -380,8 +344,6 @@ class ConversationalNeo4jChatbot:
 
                             formatted_results.append(quote_info)
                         context_string_for_llm = "\n\n".join(formatted_results)
-                        # print(
-                        #     f"DEBUG: _generate_llm_response: Formatted context for LLM:\n{context_string_for_llm}")
                     else:
                         context_string_for_llm = "No specific content found in the graph relevant to the query."
                         print(
@@ -393,7 +355,7 @@ class ConversationalNeo4jChatbot:
                     f"ERROR: _generate_llm_response: Exception caught during Neo4j retrieval: {e}")
                 context_string_for_llm = "An error occurred while searching the knowledge base. Please try rephrasing your question."
             finally:
-                pass  # close() is handled elsewhere
+                pass
 
             # Store the context for subsequent queries
             self._current_graph_context = context_string_for_llm
@@ -409,7 +371,7 @@ class ConversationalNeo4jChatbot:
             self._conversation_history) if self._conversation_history else "No previous conversation."
 
         llm_prompt = f"""You are a human that quotes the best matching result and summarizes it's meaning from a graph database of quotes.
-        You should also take into account the previous conversation to answer follow-up questions. IMPORTANT: BE VERY CONCISE OR I KILL YOU!
+        You should also take into account the previous conversation to answer follow-up questions. IMPORTANT: BE VERY CONCISE OR I WILL KILL YOU!
 
         --- Previous Conversation ---
         {chat_history_str}
@@ -417,26 +379,21 @@ class ConversationalNeo4jChatbot:
 
         My query was: "{user_query}"
         The results from the Neo4j Graph where:
-        {context_string_for_llm}
-        Please, summarize this results concisely.
+
+        "{context_string_for_llm}"
+
+        ; tldr;
         """
         print(
             f"DEBUG: _generate_llm_response: Final LLM prompt:\n\n{llm_prompt}...")
 
         llm_raw_response = await self.llm_call_function(llm_prompt)
-        # print(
-        #     f"DEBUG: _generate_llm_response: LLM raw response received: {llm_raw_response}")
 
         thinking_process, final_answer = await self._extract_llm_parts(llm_raw_response)
-
-        # if thinking_process:
-        #     print(
-        #         f"\n--- Chatbot Thinking Process ---\n{thinking_process}\n----------------------------------")
 
         print(
             f"DEBUG: _generate_llm_response: Returning final answer: \n\n'{final_answer}'")
         return final_answer
-    # --- MODIFICATION END ---
 
     async def start_conversation_loop(self, initial_user_name: Optional[str] = None):
         """
@@ -445,7 +402,6 @@ class ConversationalNeo4jChatbot:
         """
         # Set the current user for this conversation session
         self._current_user_name = initial_user_name if initial_user_name else "Guest"
-        # _current_speaker_embedding is removed as voice is controlled globally
 
         audio_manager.print_and_speak(
             f"Hello {self._current_user_name}. What's your initial question for the knowledge graph?"
@@ -456,8 +412,8 @@ class ConversationalNeo4jChatbot:
         while True:
             # Clear history for a new initial query session
             self._conversation_history = []
-            # Clear the stored graph context for a fresh start
-            self._current_graph_context = "No specific content found yet from the initial query."  # Reset context
+            # Clear the stored graph context for a fresh start (Reset context)
+            self._current_graph_context = "No specific content found yet from the initial query."
 
             audio_manager.print_and_speak(
                 "Ask your initial question to the knowledge graph.")
@@ -493,7 +449,7 @@ class ConversationalNeo4jChatbot:
                 f"{self._current_user_name}: {initial_query_text}")
             self._conversation_history.append(f"Chatbot: {chatbot_response}")
 
-            # Now, enter the continuous follow-up conversation loop
+            # Enter the continuous follow-up conversation loop
             while True:
                 audio_manager.print_and_speak(
                     "Would you like to know more about it? Or say 'one' to ask a new question, or 'two' to go to the main menu."

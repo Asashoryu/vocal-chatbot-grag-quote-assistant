@@ -38,18 +38,20 @@ class Neo4jConnector:
             except ServiceUnavailable as e:
                 print(
                     f"Connection failed: Neo4j database is not running or accessible at {self._uri}. Error: {e}")
-                self._driver = None  # Ensure driver is reset on failure
+                # Ensure driver is reset on failure
+                self._driver = None
                 return False
             except Exception as e:
                 print(f"Failed to establish initial connection to Neo4j: {e}")
                 print("Please check your URI, username, and password.")
-                self._driver = None  # Ensure driver is reset on failure
+                # Ensure driver is reset on failure
+                self._driver = None
                 return False
         else:
             # Driver already exists, verify its connectivity
             try:
                 self._driver.verify_connectivity()
-                # print("Neo4j driver is already connected and verified.") # Optional: for verbose logging
+                print("Neo4j driver is already connected and verified.")
                 return True
             except (ServiceUnavailable, ClientError) as e:
                 # Connection lost or became unavailable

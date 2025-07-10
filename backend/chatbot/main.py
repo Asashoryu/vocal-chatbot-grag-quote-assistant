@@ -3,39 +3,15 @@ import asyncio
 import torch
 import pickle
 import traceback
-import soundfile as sf  # Import soundfile for saving audio
+import soundfile as sf
 
-# --- Import your configuration ---
 import config
 
-# --- Import the globally accessible AudioManager and ModelLoaderManager instances ---
 from AudioManager import audio_manager
 from ModelLoaderManager import model_loader_manager
 
-# Import the CommandLineMenu class
 from CommandLineMenu import CommandLineMenu
 
-# Import Neo4jConnector to perform an initial connection test
-from Neo4jConnector import Neo4jConnector
-
-import os
-import asyncio
-import torch
-import pickle
-import traceback
-import soundfile as sf  # Make sure this is imported if sf.write is used directly
-
-# --- Import your configuration ---
-import config
-
-# --- Import the globally accessible AudioManager and ModelLoaderManager instances ---
-from AudioManager import audio_manager  # This imports the singleton instance
-from ModelLoaderManager import model_loader_manager
-
-# Import the CommandLineMenu class
-from CommandLineMenu import CommandLineMenu
-
-# Import Neo4jConnector to perform an initial connection test
 from Neo4jConnector import Neo4jConnector
 
 
@@ -44,7 +20,7 @@ def ensure_fastpitch_embeddings_exist():
     Generates an audio saying "The quick brown fox jumps over the lazy dog."
     for specific TTS speaker IDs, extracts their speaker embeddings,
     and saves them to config.FASTPITCH_EMBEDDINGS_DIR.
-    Existing embeddings are skipped. Temporary audio files are deleted after use.
+    Existing embeddings are skipped.
 
     This function now explicitly checks for a multi-speaker FastPitch model
     and processes a defined list of speaker IDs.
@@ -70,7 +46,7 @@ def ensure_fastpitch_embeddings_exist():
 
     tts_model = audio_manager.tts_model
 
-    # --- NEW LOGIC: Check if the model is a multi-speaker FastPitch model ---
+    # Check if the model is a multi-speaker FastPitch model
     is_multispeaker_fastpitch = False
     if hasattr(tts_model, 'fastpitch') and hasattr(tts_model.fastpitch, 'speaker_emb') and tts_model.fastpitch.speaker_emb is not None:
         is_multispeaker_fastpitch = True
@@ -80,21 +56,18 @@ def ensure_fastpitch_embeddings_exist():
     if not is_multispeaker_fastpitch:
         print("INFO: The loaded TTS model is not identified as a multi-speaker FastPitch model. Exiting embedding generation.")
         return
-    # --- END NEW LOGIC ---
 
     text_to_synthesize = "The quick brown fox jumps over the lazy dog."
 
-    # --- MODIFIED LOGIC: Create the combined list of speaker IDs to process ---
-    # Start with IDs from 0 to 19
+    # Create the combined list of speaker IDs to process, start with IDs from 0 to 19
     speaker_ids_initial_range = list(range(0, 20))  # Generates [0, 1, ..., 19]
 
-    # Add the specific additional speaker IDs
+    # Add the specific additional speaker IDs from the imported FastPitch Multispeaker
     additional_speaker_ids = [
         92, 6097, 9017, 6670, 6671, 8051, 9136, 11614, 11697, 12787
     ]
 
-    # Combine them using a set to ensure uniqueness, then convert back to a sorted list
-    # Sorting ensures consistent processing order, though not strictly required.
+    # Combine the ids using a set to ensure uniqueness, then convert back to a sorted list
     speaker_ids_to_process = sorted(
         list(set(speaker_ids_initial_range + additional_speaker_ids)))
     # --- END MODIFIED LOGIC ---
@@ -175,16 +148,15 @@ async def main():
     try:
         os.makedirs(config.AUDIO_RECORDS_DIR, exist_ok=True)
         os.makedirs(config.EMBEDDING_OUTPUT_DIR, exist_ok=True)
-        # Ensure config.FASTPITCH_EMBEDDINGS_DIR is also created here if it's not nested
         os.makedirs(config.FASTPITCH_EMBEDDINGS_DIR, exist_ok=True)
         print(
             f"Ensured directories exist: {config.AUDIO_RECORDS_DIR}, {config.EMBEDDING_OUTPUT_DIR}, {config.FASTPITCH_EMBEDDINGS_DIR}")
     except Exception as e:
         print(f"FATAL ERROR: Could not create necessary directories: {e}")
         print("Please check directory paths and permissions. Exiting application.")
-        return  # Exit if directory creation fails
+        return
 
-    # --- STEP 1: Initialize ModelLoaderManager ONCE ---
+    # Initialize ModelLoaderManager ONCE
     print("\n--- Initializing ModelLoaderManager and loading models ---")
     try:
         model_loader_manager.initialize_all_models()
@@ -194,16 +166,15 @@ async def main():
             f"\nFATAL ERROR: Failed to initialize ModelLoaderManager or load models: {e}")
         print("Please ensure NeMo dependencies are met, models are available, and check internet connection for downloads.")
         print("Exiting application.")
-        return  # Exit if model loading fails
+        return
 
-    # --- STEP 2: Initialize AudioManager ONCE with models from ModelLoaderManager ---
+    # Initialize AudioManager ONCE with models from ModelLoaderManager
     print("\n--- Initializing AudioManager ---")
     try:
         audio_manager.initialize(
             asr_model=model_loader_manager.asr_model,
             tts_model=model_loader_manager.tts_model,
             vocoder_model=model_loader_manager.vocoder_model,
-            # Use original SAMPLE_RATE for general audio manager operations
             sample_rate=config.SAMPLE_RATE,
             recording_duration_seconds=config.RECORDING_DURATION_SECONDS,
             audio_records_dir=config.AUDIO_RECORDS_DIR,
@@ -215,11 +186,11 @@ async def main():
         print(f"\nFATAL ERROR: Failed to initialize AudioManager: {e}")
         print("Please check audio device setup, NeMo model paths, and AudioManager configuration.")
         print("Exiting application.")
-        return  # Exit if AudioManager initialization fails
+        return
 
-    # --- STEP 3: Perform an initial Neo4j connection test ---
+    # Perform an initial Neo4j connection test
     print("\n--- Attempting initial Neo4j connection test ---")
-    test_neo4j_connector = None  # Initialize to None
+    test_neo4j_connector = None
     try:
         test_neo4j_connector = Neo4jConnector(
             config.NEO4J_URI, config.NEO4J_USERNAME, config.NEO4J_PASSWORD
@@ -229,27 +200,21 @@ async def main():
             print(
                 f"Please check your Neo4j server status, URI ({config.NEO4J_URI}), username, and password.")
             print("Exiting application.")
-            return  # Exit if connection fails
+            return
         else:
             print("Neo4j database connection successful.")
     except Exception as e:
         print(
             f"\nFATAL ERROR: An unexpected error occurred during Neo4j connection test: {e}")
         print("Exiting application.")
-        return  # Exit on unexpected error during connection test
+        return
     finally:
         # Ensure the test connection is closed, regardless of success or failure
-        if test_neo4j_connector:  # Corrected from test_neo44j_connector
+        if test_neo4j_connector:
             test_neo4j_connector.close()
             print("Neo4j test connection closed.")
 
-    # --- STEP 4: Ensure FastPitch embeddings are generated (now after AudioManager is fully initialized) ---
-    # Call the corrected function - it now relies on the global audio_manager instance
-    # ensure_fastpitch_embeddings_exist()
-
-    # --- STEP 5: Create an instance of CommandLineMenu and start it ---
     print("\n--- Starting command line menu ---")
-
     try:
         menu = CommandLineMenu(
             neo4j_uri=config.NEO4J_URI,

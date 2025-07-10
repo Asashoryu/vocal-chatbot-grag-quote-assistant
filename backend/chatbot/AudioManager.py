@@ -3,15 +3,14 @@ import sounddevice as sd
 import soundfile as sf
 import numpy as np
 import torch
-import torch.nn.functional as F  # For cosine_similarity
+import torch.nn.functional as F
 from torch.cuda.amp import autocast
 from typing import Optional, Dict, Union, Tuple
-import traceback  # Import traceback for detailed error logging
-import pickle  # For loading embeddings in verify_speaker
-import torchaudio  # For resampling audio in generate_speaker_embedding
-import inspect  # This line must be present!
+import traceback
+import pickle
+import torchaudio
+import inspect
 
-# Assuming config is correctly defined and accessible in your project
 import config
 
 
@@ -41,7 +40,8 @@ class AudioManager:
             self.tts_model = None
             self.vocoder_model = None
             self.speaker_verification_model = None
-            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'  # Default device
+            # Default device
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
             # These will be set by the initialize method from config
             self.sample_rate: Optional[int] = None
@@ -49,13 +49,14 @@ class AudioManager:
             self.audio_records_dir: Optional[str] = None
             self.use_tts_for_answers_flag: Optional[bool] = None
 
-            self.num_tts_speakers: int = 0  # Stores the number of pre-trained TTS speakers
+            # Stores the number of pre-trained TTS speakers
+            self.num_tts_speakers: int = 0
 
             # This stores the embedding from the *last successful call to generate_speaker_embedding*.
             # It's NOT a registry of all users, but a temporary holder for a single embedding.
             self._last_extracted_user_embedding: Optional[np.ndarray] = None
 
-            self._initialized_flag = True  # Mark __init__ as completed
+            self._initialized_flag = True
 
     def initialize(self, asr_model, tts_model, vocoder_model,
                    sample_rate: int, recording_duration_seconds: int,
@@ -194,13 +195,15 @@ class AudioManager:
             recorded_audio_data = sd.rec(int(recording_duration_seconds * self.sample_rate),
                                          samplerate=self.sample_rate, channels=1, dtype='float32',
                                          device=default_input_device_id)
-            sd.wait()  # Wait for recording to finish
+            # Wait for recording to finish
+            sd.wait()
             print("Recording finished.")
             return recorded_audio_data
 
         except Exception as e:
             print(f"An error occurred during recording: {e}")
-            traceback.print_exc()  # Print full traceback for debugging
+            # Print full traceback for debugging
+            traceback.print_exc()
             return None
 
     def transcribe_audio(self, audio_filepath: str) -> str:
@@ -222,7 +225,6 @@ class AudioManager:
                 f"\n--- Starting ASR Transcription for '{os.path.basename(audio_filepath)}' ---")
 
             # Perform transcription
-            # Assuming ASR model's transcribe method takes a list of file paths
             transcriptions_raw = self.asr_model.transcribe([audio_filepath])
             print(
                 f"DEBUG: Raw transcription from ASR model (type: {type(transcriptions_raw)}): {transcriptions_raw}")
@@ -291,16 +293,10 @@ class AudioManager:
             return None
 
         try:
-            # CRITICAL CORRECTION: NeMo's get_embedding for EncDecSpeakerLabelModel
-            # typically expects a list of file paths. It handles the internal
-            # audio loading, resampling, and feature extraction.
             embeddings_list = self.speaker_verification_model.get_embedding(
                 [audio_filepath]  # Pass the audio_filepath as a list
             )
 
-            # get_embedding returns a list of tensors, one for each input file.
-            # Since we passed a single file, we take the first element.
-            # This will be a torch.Tensor
             speaker_emb_tensor = embeddings_list[0]
             speaker_emb_np = speaker_emb_tensor.cpu().numpy()  # Convert to NumPy array
             return speaker_emb_np
@@ -412,7 +408,7 @@ class AudioManager:
             return None, None  # No match, return None for ID and embedding
 
     def synthesize_speech(self, text: str,
-                          speaker_id: int = 0,  # Defaulted to 0 as per previous request
+                          speaker_id: int = 0,
                           output_filename="response.wav", output_dir=None) -> Optional[str]:
         """
         Synthesizes speech from text using NeMo TTS models, using speaker_id
@@ -445,15 +441,13 @@ class AudioManager:
             accepts_speaker_tensor_arg = 'speaker' in gen_spec_params
 
             if accepts_speaker_tensor_arg:
-                # Convert the integer speaker_id to a torch.tensor as shown in the tutorial
+                # Convert the integer speaker_id to a torch.tensor
                 speaker_tensor = torch.tensor(
                     [speaker_id]).long().to(device=self.device)
                 spectrogram_args["speaker"] = speaker_tensor
                 print(
                     f"DEBUG: Using speaker ID {speaker_id} passed as a tensor for 'speaker' parameter.")
             else:
-                # This branch would typically mean it's a single-speaker model or
-                # expects speaker info differently, so we proceed without passing 'speaker'.
                 print("INFO: TTS model's generate_spectrogram does not appear to accept a 'speaker' tensor parameter. Proceeding without explicit speaker parameter.")
 
             with torch.no_grad():

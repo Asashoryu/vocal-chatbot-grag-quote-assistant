@@ -9,16 +9,10 @@ import torchaudio.transforms as T
 import soundfile as sf
 import traceback
 import operator
-# Import PyTorch's functional module for cosine similarity
 import torch.nn.functional as F
 from typing import Optional, List, Tuple
 
-# --- Import your global configuration ---
 import config
-
-# --- Import the globally accessible AudioManager instance ---
-# This import assumes AudioManager.py is in the same directory or accessible via Python path.
-# from AudioManager import audio_manager # Commented out as audio_manager should be passed if used
 
 
 class SpeakerVerifier:
@@ -33,12 +27,10 @@ class SpeakerVerifier:
         Configuration parameters are sourced from config.py and AudioManager.
 
         Args:
-            model: The loaded NeMo speaker verification model (e.g., ECAPA_TDNN_SpeakerNet).
+            model: The loaded NeMo speaker verification model.
             audio_manager_instance: An instance of AudioManager for print_and_speak.
                                     Passing it explicitly is better for dependency management.
         """
-        # DEBUG PRINTS (keep as print, as requested)
-        # print(f"DEBUG: SpeakerVerifier.__init__ received model: {model}")
         print(
             f"DEBUG: SpeakerVerifier.__init__ received model type: {type(model)}")
 
@@ -51,16 +43,16 @@ class SpeakerVerifier:
         # Assign the AudioManager instance
         self.audio_manager = audio_manager_instance
         if self.audio_manager is None:
-            print("Warning: AudioManager instance not provided to SpeakerVerifier. "
+            print("WARNING: AudioManager instance not provided to SpeakerVerifier. "
                   "print_and_speak functionality will be unavailable via this class.")
 
         if self.model:
             self.model = self.model.to(self.device)
             self.model.eval()
         else:
-            # Internal warning, not for user conversation
+            # Internal WARNING, not for user conversation
             print(
-                "Warning: Speaker verification model not provided during SpeakerVerifier initialization.")
+                "WARNING: Speaker verification model not provided during SpeakerVerifier initialization.")
 
         # Ensure the embedding output directory exists
         os.makedirs(self.embedding_output_dir, exist_ok=True)
@@ -68,10 +60,10 @@ class SpeakerVerifier:
     def _speak_info(self, text: str, speaker_id: Optional[int] = None):
         """Helper to use AudioManager's print_and_speak if available."""
         if self.audio_manager:
-            # Using None for speaker_embedding_np
             self.audio_manager.print_and_speak(text, speaker_id)
         else:
-            print(text)  # Fallback to print if AudioManager is not set
+            # Fallback to print if AudioManager is not set
+            print(text)
 
     def extract_speaker_embedding(self, audio_filepath: str, embedding_output_filename="speaker_embedding.pkl", save_embedding: bool = True) -> Optional[np.ndarray]:
         """
@@ -110,9 +102,8 @@ class SpeakerVerifier:
                 raise ValueError(
                     f"Unexpected audio waveform shape after initial processing: {waveform.shape}. Expected [1, samples] or [samples].")
 
-            # --- CRITICAL FIX: Move the waveform to the correct device BEFORE resampling ---
+            # Move the waveform to the correct device BEFORE resampling
             waveform = waveform.to(self.device)
-            # --- END CRITICAL FIX ---
 
             # Resample if necessary (NeMo models typically expect 16000 Hz)
             if sample_rate != self.target_sample_rate:
@@ -123,13 +114,14 @@ class SpeakerVerifier:
                 # Now, both waveform and resampler are on the same device
                 waveform = resampler(waveform)
 
-            # The length (in samples) - MUST be torch.long dtype
+            # The length must be torch.long dtype
             audio_lengths = torch.tensor(
                 [waveform.shape[1]], dtype=torch.long).to(self.device)
 
             # Check for silent audio after processing
             max_amplitude = torch.max(torch.abs(waveform)).item()
-            if max_amplitude < 0.001:  # Threshold for considering "silent"
+            # Threshold for considering "silent"
+            if max_amplitude < 0.001:
                 print(f"\nAudio file '{os.path.basename(audio_filepath)}' appears to be silent or extremely quiet after processing. This may lead to poor embedding quality. Please ensure the audio has clear speech.")
 
             with torch.no_grad():
@@ -141,7 +133,7 @@ class SpeakerVerifier:
                     )
                     embedding = embs.cpu().detach().numpy().squeeze()
 
-            # L2 normalization - usually done by NeMo, but good to ensure
+            # L2 normalization (usually done by NeMo, but good to ensure)
             raw_embs_l2_norm = np.linalg.norm(embedding)
             if raw_embs_l2_norm < 1e-6:  # Check if norm is essentially zero
                 print(
@@ -161,9 +153,9 @@ class SpeakerVerifier:
             return embedding
 
         except Exception as e:
-            # Internal error messages
             print(f"An error occurred during embedding extraction: {e}")
-            traceback.print_exc()  # Print full traceback for debugging
+            # Print full traceback for debugging
+            traceback.print_exc()
             print("Please ensure: 1. The audio file is valid and readable. 2. The NeMo model loaded successfully without errors.")
             return None
 
@@ -178,7 +170,7 @@ class SpeakerVerifier:
         speaker_ids = []
         if not os.path.isdir(self.embedding_output_dir):
             print(
-                f"Warning: Embedding directory not found: {self.embedding_output_dir}")
+                f"WARNING: Embedding directory not found: {self.embedding_output_dir}")
             return []
 
         for filename in os.listdir(self.embedding_output_dir):
@@ -188,7 +180,8 @@ class SpeakerVerifier:
                 if speaker_id.endswith("_embedding"):
                     speaker_id = speaker_id[:-len("_embedding")]
                 speaker_ids.append(speaker_id)
-        return sorted(list(set(speaker_ids)))  # Return unique and sorted IDs
+        # Return unique and sorted IDs
+        return sorted(list(set(speaker_ids)))
 
     def verify_speaker_against_folder_embeddings(self, new_voice_audio_path: str, registered_embeddings_folder: str = None) -> Tuple[bool, Optional[str], Optional[float], Optional[np.ndarray], List[dict]]:
         """
@@ -227,22 +220,19 @@ class SpeakerVerifier:
                 f"Error: Registered embeddings folder not found at {registered_embeddings_folder}. Please ensure the folder exists and contains .pkl or .npy embedding files.", speaker_id=0)  # Changed None to speaker_id=0
             return False, None, None, None, []
 
-        # Internal process messages (print only)
         print(f"\n--- Starting Speaker Verification Against Registered Embeddings ---")
         print(
             f"Verifying '{os.path.basename(new_voice_audio_path)}' against embeddings in '{registered_embeddings_folder}'...")
 
-        # 1. Extract embedding for the new voice
-        # Internal process message
+        # Extract embedding for the new voice
         print("\nExtracting embedding for the new voice to be verified...")
         new_voice_embedding = self.extract_speaker_embedding(
             audio_filepath=new_voice_audio_path,
             save_embedding=False  # Don't save this temporary embedding
         )
         if new_voice_embedding is None:
-            # Internal error
             self._speak_info(
-                "Error: Failed to extract embedding for the new voice. Aborting verification.", speaker_id=0)  # Changed None to speaker_id=0
+                "Error: Failed to extract embedding for the new voice. Aborting verification.", speaker_id=0)
             return False, None, None, None, []
 
         # Ensure embedding is 2D for cosine_similarity (1, embedding_dim)
@@ -254,20 +244,17 @@ class SpeakerVerifier:
         best_overall_score = -1.0
         best_overall_match_filename = None
         best_match_exceeds_threshold = False
-        # New: to store the actual best matching embedding
         best_matching_embedding_data = None
 
-        # 2. Iterate through registered embeddings
+        # Iterate through registered embeddings
         registered_files = [f for f in os.listdir(
             registered_embeddings_folder) if f.endswith(('.pkl', '.npy'))]
 
         if not registered_files:
-            # Internal status
             print(
                 f"No .pkl or .npy embedding files found in '{registered_embeddings_folder}'.")
             return False, None, None, None, []
 
-        # Internal status
         print(
             f"\nFound {len(registered_files)} registered embeddings. Comparing...")
 
@@ -281,13 +268,11 @@ class SpeakerVerifier:
                 elif filename.endswith('.npy'):
                     registered_embedding = np.load(filepath)
                 else:
-                    # Internal status
                     print(
                         f"Skipping '{filename}': Unsupported embedding file type.")
                     continue
 
                 if not isinstance(registered_embedding, np.ndarray) or registered_embedding.ndim != 1:
-                    # Internal status
                     print(
                         f"Skipping '{filename}': Invalid embedding format or shape. Expected 1D numpy array.")
                     continue
@@ -297,16 +282,15 @@ class SpeakerVerifier:
 
                 score = F.cosine_similarity(
                     torch.from_numpy(new_voice_embedding_tensor).float().to(
-                        self.device),  # Ensure on device
+                        self.device),
                     torch.from_numpy(registered_embedding_tensor).float().to(
-                        self.device)  # Ensure on device
+                        self.device)
                 ).item()
                 is_same_speaker = score >= self.verification_threshold
 
                 all_results.append(
                     {'filename': filename, 'score': score, 'is_match': is_same_speaker})
 
-                # Update best_overall_match if this one is better and meets threshold
                 # Only update best_match_exceeds_threshold if score meets threshold
                 if is_same_speaker and score > best_overall_score:
                     best_overall_score = score
@@ -315,13 +299,12 @@ class SpeakerVerifier:
                     best_matching_embedding_data = registered_embedding.copy()  # Store a copy
 
             except Exception as e:
-                # Internal error
                 print(
                     f"Error processing '{filename}': {e}. Skipping this file.")
-                traceback.print_exc()  # Keep this for debugging
+                traceback.print_exc()
                 continue
 
-        # 3. Sort results by similarity score (descending)
+        # Sort results by similarity score (descending)
         all_results_sorted = sorted(
             all_results, key=operator.itemgetter('score'), reverse=True)
 
@@ -344,28 +327,25 @@ class SpeakerVerifier:
                 elif highest_score_filename_below_threshold.endswith('.npy'):
                     best_matching_embedding_data = np.load(best_match_filepath)
 
-        # --- Final Verification Summary (only these are spoken to the user) ---
-        print("\n--- Final Verification Summary ---")  # Internal status
+        # Final Verification Summary (only these are spoken to the user)
+        print("\n--- Final Verification Summary ---")
         if best_match_exceeds_threshold:
             self._speak_info(
-                f"SUCCESS: The new voice is identified as '{best_overall_match_filename}'!", speaker_id=0)  # Changed None to speaker_id=0
+                f"SUCCESS: The new voice is identified as '{best_overall_match_filename}'!", speaker_id=0)
             self._speak_info(
-                f"           Similarity Score is {best_overall_score:.4f} (Above the threshold that is {self.verification_threshold:.4f})", speaker_id=0)  # Changed None to speaker_id=0
+                f"           Similarity Score is {best_overall_score:.4f} (Above the threshold that is {self.verification_threshold:.4f})", speaker_id=0)
         elif all_results_sorted:
             # Get the highest score even if it's below the threshold
             highest_score_overall = all_results_sorted[0]['score']
-            # highest_score_filename = all_results_sorted[0]['filename'] # Not used in output, but available
+            # highest_score_filename = all_results_sorted[0]['filename']
             self._speak_info(
-                f"NO MATCH: The new voice is likely DIFFERENT from all registered speakers.", speaker_id=0)  # Changed None to speaker_id=0
+                f"NO MATCH: The new voice is likely DIFFERENT from all registered speakers.", speaker_id=0)
             self._speak_info(
                 f"           Highest similarity found at score {highest_score_overall:.4f} (Below the threshold that is {self.verification_threshold:.4f}).", speaker_id=0)  # Changed None to speaker_id=0
         else:
-            # This case means no embeddings were found/processed correctly at all
-            # Internal error/status
             print(
                 "No registered embeddings were processed, or an error occurred. Cannot verify speaker.")
 
-        # Updated return signature: (is_verified, best_match_filename, best_score, best_matching_embedding_data, all_results_sorted)
         return best_match_exceeds_threshold, best_overall_match_filename, best_overall_score, best_matching_embedding_data, all_results_sorted
 
     def get_closest_fastpitch_speaker_id_from_embedding(self, user_embedding_np: np.ndarray) -> Optional[int]:
@@ -374,24 +354,10 @@ class SpeakerVerifier:
                 "User embedding is None for FastPitch matching. Skipping.", speaker_id=0)
             return None
 
-        # Duplicate Titanet 192‑dim to 384‑dim for FastPitch compatibility
-        # if user_embedding_np.ndim == 1 and user_embedding_np.shape[0] == 192:
-        #     user_embedding_np = np.concatenate(
-        #         [user_embedding_np, user_embedding_np], axis=0)
-        # elif user_embedding_np.ndim == 2 and user_embedding_np.shape[1] == 192:
-        #     user_embedding_np = np.concatenate(
-        #         [user_embedding_np, user_embedding_np], axis=1)
-        # else:
-        #     self._speak_info(
-        #         f"Unexpected user embedding shape {user_embedding_np.shape}. Expected 192 dims.",
-        #         speaker_id=0
-        #     )
-        #     return None
-
         fastpitch_embeddings_dir = config.FASTPITCH_EMBEDDINGS_DIR
         if not os.path.isdir(fastpitch_embeddings_dir):
             self._speak_info(
-                f"Warning: FastPitch embeddings directory not found at {fastpitch_embeddings_dir}.", speaker_id=0)
+                f"WARNING: FastPitch embeddings directory not found at {fastpitch_embeddings_dir}.", speaker_id=0)
             return None
 
         # Prepare user embedding tensor
@@ -427,7 +393,8 @@ class SpeakerVerifier:
                         elif isinstance(obj, np.ndarray):
                             current_np = obj
                         else:
-                            continue  # unsupported type
+                            # unsupported type
+                            continue
 
                 # ensure correct shape
                 current_np = current_np.reshape(1, -1)
@@ -439,7 +406,7 @@ class SpeakerVerifier:
                     closest_fastpitch_id = speaker_id
 
             except Exception as e:
-                print(f"Warning: Error processing '{fn}': {e}")
+                print(f"WARNING: Error processing '{fn}': {e}")
                 traceback.print_exc()
                 continue
 

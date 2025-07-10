@@ -109,6 +109,119 @@ CALL apoc.periodic.iterate(
 RETURN batches, total; // Returns the number of batches processed and total items
 
 
+# v2
+
+// Import the json to neo4j graph
+
+// --- 0. (Explicit constraint drops added to this script) ---
+// Based on your 'SHOW CONSTRAINTS' output, constraints will be dropped by name if they exist.
+// If the "Property value is too large to index" error reappears, it implies a
+// constraint on `:Quote(text)` has been re-added, and you would need to manually
+// drop it again (e.g., DROP CONSTRAINT constraint_name;).
+
+// Drop constraints IF EXISTS before recreation/import
+DROP CONSTRAINT constraint_author_name_unique IF EXISTS;
+DROP CONSTRAINT constraint_context_text_unique IF EXISTS;
+DROP CONSTRAINT constraint_detail_text_unique IF EXISTS;
+DROP CONSTRAINT constraint_quote_hash_unique IF EXISTS;
+DROP CONSTRAINT constraint_quote_text_unique IF EXISTS; // Added this line to safely drop old text constraint if it exists
+
+
+// --- 1. OPTIONAL: Clear Existing Data (Use with EXTREME CAUTION) ---
+// If this is a brand new Neo4j instance or you want to wipe everything
+// before importing, uncomment the line below.
+// WARNING: This will delete ALL nodes and relationships in your graph!
+// MATCH (n) DETACH DELETE n;
+
+// Repeatedly delete nodes in batches for larger graphs (as provided by you)
+MATCH (q)
+WITH q LIMIT 200000
+DETACH DELETE q;
+
+MATCH (q)
+WITH q LIMIT 200000
+DETACH DELETE q;
+
+MATCH (q)
+WITH q LIMIT 200000
+DETACH DELETE q;
+
+MATCH (q)
+WITH q LIMIT 200000
+DETACH DELETE q;
+
+
+// --- 2. Create Uniqueness Constraints for Efficiency and Data Integrity ---
+// These constraints ensure data integrity and optimize MERGE operations.
+// We are re-adding the constraint on 'hash' for Quote nodes for performance.
+
+// Using meaningful constraint names (UNCOMMENTED for creation)
+CREATE CONSTRAINT constraint_author_name_unique IF NOT EXISTS FOR (a:Author) REQUIRE a.name IS UNIQUE;
+CREATE CONSTRAINT constraint_quote_hash_unique IF NOT EXISTS FOR (q:Quote) REQUIRE q.hash IS UNIQUE; // CORRECTED: Removed duplicate 'CONSTRAINT' keyword
+CREATE CONSTRAINT constraint_context_text_unique IF NOT EXISTS FOR (c:Context) REQUIRE c.text IS UNIQUE;
+CREATE CONSTRAINT constraint_detail_text_unique IF NOT EXISTS FOR (d:Detail) REQUIRE d.text IS UNIQUE;
+
+
+// --- 3. Load the JSON Lines Data and Process Each Object IN BATCHES ---
+// apoc.periodic.iterate processes the data in smaller transactions (batches)
+// to avoid memory exhaustion for large imports.
+CALL apoc.periodic.iterate(
+    "CALL apoc.load.json('file:///quotes_conv.json') YIELD value", // CORRECTED: Changed file name to quotes_conv.json
+    "
+    // Inner query: processes each 'value' (JSON object) from the outer query
+    WITH value AS quoteData
+
+    // --- CORRECTION 1: ADDED TOP-LEVEL DATA VALIDATION ---
+    // Ensure essential properties (author and quote) are not NULL or empty strings
+    // If these are missing, the line will be skipped, preventing potential errors down the line.
+    WHERE quoteData.author IS NOT NULL AND quoteData.author <> ''
+      AND quoteData.quote IS NOT NULL AND quoteData.quote <> ''
+
+    // 3.1 Create or Merge the Author Node
+    MERGE (a:Author {name: quoteData.author})
+
+    // 3.2 Generate a unique hash for the quote text (for fast MERGE lookup)
+    // Then create or Merge the Quote Node using its hash.
+    // The full original quote text is set as the 'text' property.
+    WITH quoteData, a, apoc.util.sha256([quoteData.quote]) AS quoteHash
+    MERGE (q:Quote {hash: quoteHash})
+    ON CREATE SET q.text = quoteData.quote // Store the full original quote text
+    // ON MATCH SET q.text = quoteData.quote // Optional: Uncomment if you want to ensure text is updated on re-runs
+
+    // 3.3 Link Author to Quote
+    MERGE (a)-[:WROTE]->(q) // Relationship type changed to :WROTE as per Python
+
+    // 3.4 Conditionally Create/Merge the Context Node and Relationship
+    // Uses 'text' property for Context, matching Python.
+    WITH quoteData, q
+    WHERE quoteData.context IS NOT NULL
+    MERGE (c:Context {text: quoteData.context}) // Using 'text' property as per Python
+    MERGE (q)-[:HAS_CONTEXT]->(c)
+
+    // --- 3.5 Process 'sources' (now a list of strings) ---
+    // UNWIND each string directly from the sources array.
+    WITH q, quoteData.sources AS sourcesList // Carry over the Quote node and the list of sources
+    UNWIND sourcesList AS sourceText // CORRECTED: Unwind each string directly into 'sourceText'
+
+    // Filter out NULL or empty strings
+    // WHERE sourceText IS NOT NULL AND sourceText <> ''
+
+    // Create or Merge the Detail Node using the 'sourceText' string
+    MERGE (d:Detail {text: sourceText})
+
+    // Create the HAS_DETAIL Relationship from the Quote to the Detail
+    MERGE (q)-[:HAS_DETAIL]->(d)
+    ",
+    // Configuration for apoc.periodic.iterate:
+    // batchSize: Number of items processed per transaction (adjust as needed)
+    // parallel: false for safer initial import, true for potentially faster but more resource-intensive
+    // iterateList: true because apoc.load.json yields individual items from a list
+    {batchSize: 1000, parallel: false, iterateList: true, retries: 3} // Corrected batchSize to 100, added retries
+) YIELD batches, total, timeTaken, committedOperations, failedOperations, failedBatches, retries, errorMessages
+RETURN batches, total, timeTaken, committedOperations, failedOperations, failedBatches, retries, errorMessages;
+
+
+
 # Is graph working query check
 MATCH (a:Author {name: "Albert Einstein"})-[:WROTE]->(q:Quote)
 OPTIONAL MATCH (q)-[:HAS_CONTEXT]->(c:Context)
